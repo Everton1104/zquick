@@ -1,0 +1,14 @@
+# dados do usuario (conversas com prints em base64)
+history/
+
+# modulo ps2exe de terceiros (baixado da PSGallery)
+tools/
+
+# artefatos de build
+zquick.exe
+kit/zquick.exe
+kit/zquick.ps1
+
+# sobras de teste / log
+teste-arquivo.txt
+*.log

@@ -1,0 +1,35 @@
+{
+  "profile": "zai",
+  "model": "auto",
+  "hotkey": "alt+q",
+  "maxTokens": 2048,
+  "searchEngine": "bing",
+  "hideOnBlur": false,
+  "systemPrompt": null,
+  "profiles": {
+    "zai": {
+      "label": "Z.ai GLM",
+      "baseUrl": "https://api.z.ai/api/anthropic",
+      "apiKey": "COLE-AQUI-SUA-CHAVE-ZAI",
+      "fastModel": "glm-5.3-flash",
+      "bigModel": "glm-5.3",
+      "visionModel": "glm-5.3-flash",
+      "models": [
+        "auto",
+        "glm-5.3-flash",
+        "glm-5.3"
+      ]
+    },
+    "kimi": {
+      "label": "Kimi (exemplo)",
+      "baseUrl": "https://api.moonshot.cn/anthropic",
+      "apiKey": "COLE-AQUI-SUA-CHAVE-KIMI",
+      "fastModel": "kimi-k2-0905-preview",
+      "bigModel": "kimi-k2-0905-preview",
+      "models": [
+        "kimi-k2-0905-preview"
+      ]
+    }
+  },
+  "windowOpacity": 1.0
+}

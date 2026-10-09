@@ -1,0 +1,41 @@
+{
+  "profile": "zai",
+  "model": "auto",
+  "hotkey": "alt+q",
+  "maxTokens": 2048,
+  "searchEngine": "bing",
+  "hideOnBlur": false,
+  "systemPrompt": null,
+  "windowOpacity": 0.8,
+  "theme": {
+    "bg": "#0C0C0C",
+    "card": "#16161A",
+    "panel": "#1E1E24",
+    "input": "#080808",
+    "border": "#2E2E38",
+    "fg": "#E4E4E4",
+    "dim": "#767676",
+    "status": "#B2B2B2",
+    "q": "#9CC7FF",
+    "accent": "#3B78FF",
+    "accent2": "#6EA8FF",
+    "code": "#8CD9FF",
+    "trayA": "#3B78FF",
+    "trayB": "#1F4FC4"
+  },
+  "profiles": {
+    "zai": {
+      "label": "Z.ai GLM",
+      "baseUrl": null,
+      "apiKey": null,
+      "fastModel": "glm-5.3-flash",
+      "bigModel": "glm-5.3",
+      "visionModel": "glm-5.3-flash",
+      "models": [
+        "auto",
+        "glm-5.3-flash",
+        "glm-5.3"
+      ]
+    }
+  }
+}
