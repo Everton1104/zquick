@@ -10,7 +10,13 @@ param([switch]$Hidden)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 $script:LogFile = Join-Path $env:TEMP 'zquick.log'
-function Log($s) { try { Add-Content -Path $script:LogFile -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $s) } catch {} }
+function Log($s) {
+    # 2 tentativas: leitores do log (testes E2E com ReadAllText) disputam o arquivo
+    # com o Add-Content — 1 linha perdida aqui esconde justamente o que o teste asserta
+    $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $s
+    try { Add-Content -Path $script:LogFile -Value $line }
+    catch { Start-Sleep -Milliseconds 40; try { Add-Content -Path $script:LogFile -Value $line } catch {} }
+}
 
 # ---------- mutex single-instance ----------
 $createdNew = $false
@@ -31,7 +37,8 @@ $cfg = @{
     model         = 'auto'
     hotkey        = 'win+c'
     maxTokens     = 4096
-    searchEngine  = 'bing'
+    searchEngine  = 'bing'      # bing (pre-busca cliente) | zai-server (web_search_prime no servidor) | zai
+    promptCache   = $true       # cache_control no system+tools (Z.ai aceita; provado por sonda)
     hideOnBlur    = $false
     systemPrompt  = $null
     windowOpacity = 1.0
@@ -52,7 +59,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','hideOnBlur','systemPrompt','windowOpacity')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.theme) { $cfg.theme = $j.theme }
@@ -94,7 +101,7 @@ function Save-Config {
     try {
         $out = [ordered]@{
             profile = $cfg.profile; model = $cfg.model; hotkey = $cfg.hotkey; maxTokens = $cfg.maxTokens
-            searchEngine = $cfg.searchEngine; hideOnBlur = $cfg.hideOnBlur
+            searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity
             theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow
         }
@@ -295,12 +302,23 @@ public class Engine {
     int _confirmId; readonly ManualResetEventSlim _confEv = new ManualResetEventSlim(false); bool _confOk;
     int _askId; readonly ManualResetEventSlim _askEv = new ManualResetEventSlim(false); string _askAnswer;
     bool _compactAsked;   // pergunta de compactacao da conversa: 1x por conversa
+    // plano aprovado (#13 modo plano): ate' o fim do turno as confirms rodam sem UI
+    int _planId; readonly ManualResetEventSlim _planEv = new ManualResetEventSlim(false); bool _planAnswer; bool _planOk;
     readonly int _maxTokens; readonly string _search;
+    bool _srvSearch;   // busca server-side Z.ai (server tool no /v1/messages — sonda 13/10)
+    bool _cacheCtl;    // cache_control no system + ultima tool (provado por sonda: 1550->14 input tokens)
     readonly List<string> _history = new List<string>();
     readonly object _sync = new object();
     volatile int _busy = 0;
     CancellationTokenSource _cts;
     Timer _prewarm;
+    // sessao de shell persistente (#3): processo vivo com pipes; cwd/vars/funcoes sobrevivem
+    // entre chamadas run_ps da MESMA conversa (Reset/New-Conversation mata a sessao)
+    readonly object _shLock = new object();
+    System.Diagnostics.Process _sh; StreamWriter _shIn; StreamReader _shOut; StreamReader _shErr;
+    readonly List<string> _shErrBuf = new List<string>();
+
+    class AskQ { public string Question, Header; public bool Multi; public List<string[]> Opts = new List<string[]>(); }  // Opts[i]={label,desc,preview}
 
     const string UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -328,9 +346,10 @@ public class Engine {
         return false;
     }
 
-    public Engine(string baseUrl, string apiKey, string model, string fastModel, string bigModel, int maxTokens, string searchEngine, ConcurrentQueue<UiMsg> q) {
+    public Engine(string baseUrl, string apiKey, string model, string fastModel, string bigModel, int maxTokens, string searchEngine, ConcurrentQueue<UiMsg> q, bool cacheCtl) {
         _base = baseUrl.TrimEnd('/'); _key = apiKey; _fast = fastModel; _big = bigModel;
-        _maxTokens = maxTokens; _search = searchEngine; _q = q;
+        _maxTokens = maxTokens; _search = searchEngine; _q = q; _cacheCtl = cacheCtl;
+        _srvSearch = (_search == "zai-server");   // provedor pode rejeitar -> fallback 400 desliga
         _native = _base.Replace("/api/anthropic", "/api/paas/v4");
         ApplyModel(model);
         var h = new HttpClientHandler();
@@ -354,7 +373,10 @@ public class Engine {
     // na Z.ai quem le print e o flash — o perfil define via "visionModel".
     public void SetVisionModel(string m) { lock (_sync) { _vision = string.IsNullOrEmpty(m) ? null : m; } }
 
-    public void Reset() { lock (_sync) { _history.Clear(); _compactAsked = false; try { _cts.Cancel(); } catch {} } }
+    public void Reset() {
+        lock (_sync) { _history.Clear(); _compactAsked = false; _planOk = false; try { _cts.Cancel(); } catch {} }
+        KillShell();   // conversa nova = sessao de shell nova
+    }
     public void Cancel() { lock (_sync) { try { _cts.Cancel(); } catch {} } }
 
     // ---------- "sempre permitir" (regras persistidas no zquick.json pela UI) ----------
@@ -396,6 +418,30 @@ public class Engine {
         Emit("allow", "{\"tool\":" + J(tool) + ",\"subject\":" + J(subject) + "}");
     }
 
+    // ---------- modo plano (#13): usuario aprova UMA vez, acoes seguintes sem confirm ----------
+    public void PlanDecide(int id, bool ok) {
+        lock (_sync) { if (id != _planId) return; _planAnswer = ok; _planEv.Set(); }
+    }
+
+    bool GatePlan(string title, List<string> steps, CancellationToken ct) {
+        int id;
+        lock (_sync) { _planId++; id = _planId; _planAnswer = false; _planEv.Reset(); }
+        var sb = new StringBuilder();
+        sb.Append("{\"id\":").Append(id).Append(",\"title\":").Append(J(title)).Append(",\"steps\":[");
+        for (int i = 0; i < steps.Count; i++) { if (i > 0) sb.Append(","); sb.Append(J(steps[i])); }
+        sb.Append("]}");
+        Emit("plan", sb.ToString());
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true) {
+            if (ct.IsCancellationRequested) break;
+            if (_planEv.Wait(300)) break;
+            if (sw.Elapsed.TotalMinutes > 10) { Emit("status", "plano sem resposta (10 min) — seguindo como rejeitado"); break; }
+        }
+        bool ok = _planEv.IsSet && _planAnswer && !ct.IsCancellationRequested;
+        Emit("plan", "{\"hide\":true}");
+        return ok;
+    }
+
     // historico de conversa (snapshots brutos do _history) p/ salvar/retomar
     public List<string> GetHistory() { lock (_sync) { return new List<string>(_history); } }
     public void SetHistory(List<string> msgs) { lock (_sync) { if (_busy == 1) return; _history.Clear(); _compactAsked = false; if (msgs != null) _history.AddRange(msgs); } }
@@ -420,6 +466,7 @@ public class Engine {
     }
 
     bool GateConfirm(string tool, string subject, string title, string detail, string diffJson, CancellationToken ct) {
+        if (_planOk) { Emit("status", "✅ plano: " + Trunc(subject ?? title, 60)); return true; }   // aprovado em lote
         if (ShouldAutoApprove(tool, subject)) { Emit("status", "✅ sempre permitido: " + Trunc(subject, 60)); return true; }
         int id;
         lock (_sync) { _confirmId++; id = _confirmId; _confOk = false; _confEv.Reset(); _confTool = tool; _confSubject = subject; }
@@ -447,18 +494,24 @@ public class Engine {
         lock (_sync) { if (id != _askId) return; _askAnswer = answer; _askEv.Set(); }
     }
 
-    string GateAsk(string question, string header, bool multi, List<string[]> options, CancellationToken ct) {
+    string GateAsk(List<AskQ> qs, CancellationToken ct) {
         int id;
         lock (_sync) { _askId++; id = _askId; _askAnswer = null; _askEv.Reset(); }
         var sb = new StringBuilder();
-        sb.Append("{\"id\":").Append(id)
-          .Append(",\"question\":").Append(J(question))
-          .Append(",\"header\":").Append(J(string.IsNullOrEmpty(header) ? "decisão" : header))
-          .Append(",\"multi\":").Append(multi ? "true" : "false")
-          .Append(",\"options\":[");
-        for (int i = 0; i < options.Count; i++) {
+        sb.Append("{\"id\":").Append(id).Append(",\"qs\":[");
+        for (int i = 0; i < qs.Count; i++) {
             if (i > 0) sb.Append(",");
-            sb.Append("{\"label\":").Append(J(options[i][0])).Append(",\"desc\":").Append(J(options[i][1])).Append("}");
+            sb.Append("{\"q\":").Append(J(qs[i].Question))
+              .Append(",\"h\":").Append(J(qs[i].Header))
+              .Append(",\"multi\":").Append(qs[i].Multi ? "true" : "false")
+              .Append(",\"opts\":[");
+            for (int j = 0; j < qs[i].Opts.Count; j++) {
+                if (j > 0) sb.Append(",");
+                sb.Append("{\"label\":").Append(J(qs[i].Opts[j][0]))
+                  .Append(",\"desc\":").Append(J(qs[i].Opts[j][1]))
+                  .Append(",\"preview\":").Append(J(qs[i].Opts[j][2])).Append("}");
+            }
+            sb.Append("]}");
         }
         sb.Append("]}");
         Emit("ask", sb.ToString());
@@ -474,30 +527,68 @@ public class Engine {
         return ans;
     }
 
+    // ask_user: aceita UMA pergunta (formato antigo) OU ate' 4 em "questions[]",
+    // cada opcao pode ter "preview" (mono, ex.: mockup/codigo — estilo AskUserQuestion do Claude)
     string DoAskUser(Dictionary<string, object> inp, CancellationToken ct) {
-        string question = H.S(inp, "question");
-        string header = H.S(inp, "header");
-        bool multi = false; object mv;
-        if (inp != null && inp.TryGetValue("multiSelect", out mv)) multi = mv is bool && (bool)mv;
-        var opts = new List<string[]>();
+        var qs = new List<AskQ>();
+        object qv;
+        if (inp != null && inp.TryGetValue("questions", out qv) && qv is List<object> && ((List<object>)qv).Count > 0) {
+            foreach (object x in (List<object>)qv) {
+                var qd = x as Dictionary<string, object>;
+                if (qd != null) { AskQ a = ParseAskQ(qd); if (a != null) qs.Add(a); if (qs.Count >= 4) break; }
+            }
+        } else {
+            AskQ a = ParseAskQ(inp);
+            if (a != null) qs.Add(a);
+        }
+        if (qs.Count == 0) return "ERRO: envie 'question' + 2-4 'options', ou 'questions' (array de até 4 dessas perguntas, cada uma com {question, header, multiSelect, options}).";
+        string ans = GateAsk(qs, ct);
+        if (ans == null) {
+            if (qs.Count == 1) return "O usuário cancelou ou não respondeu à pergunta. NÃO pergunte de novo: tome a decisão mais conservadora (ou nenhuma) e informe o que decidiu.";
+            return "O usuário cancelou ou não respondeu às perguntas. NÃO pergunte de novo: tome as decisões mais conservadoras (ou nenhuma) e informe o que decidiu.";
+        }
+        if (qs.Count == 1) {
+            if (ans.StartsWith("TEXTO:")) return "O usuário respondeu com texto livre: \"" + ans.Substring(6).Trim() + "\"";
+            if (ans.StartsWith("ESCOLHA:")) return "O usuário escolheu: " + ans.Substring(8).Trim().Replace(" | ", " e ") + ".";
+            return "O usuário respondeu: " + ans;
+        }
+        // multi: ans = JSON array ["ESCOLHA: x | y", "TEXTO: t", ""]
+        var parts = MJ.Parse(ans) as List<object>;
+        if (parts == null) return "O usuário respondeu: " + ans;
+        var lines = new StringBuilder();
+        for (int i = 0; i < qs.Count; i++) {
+            string p = i < parts.Count && parts[i] is string ? (string)parts[i] : "";
+            string pretty;
+            if (p.StartsWith("ESCOLHA:")) pretty = p.Substring(8).Trim().Replace(" | ", " + ");
+            else if (p.StartsWith("TEXTO:")) pretty = "texto livre: \"" + p.Substring(6).Trim() + "\"";
+            else pretty = "(sem resposta)";
+            lines.Append((i + 1)).Append(". ").Append(qs[i].Header).Append(": ").Append(pretty).Append('\n');
+        }
+        return "Respostas do usuário:\n" + lines.ToString().TrimEnd('\n') + "\nPerguntas marcadas (sem resposta): decida você a opção mais conservadora e informe.";
+    }
+
+    static AskQ ParseAskQ(Dictionary<string, object> d) {
+        if (d == null) return null;
+        string question = H.S(d, "question");
+        if (string.IsNullOrEmpty(question)) return null;
+        AskQ a = new AskQ();
+        a.Question = question;
+        a.Header = H.S(d, "header"); if (string.IsNullOrEmpty(a.Header)) a.Header = "decisão";
+        object mv; a.Multi = d.TryGetValue("multiSelect", out mv) && mv is bool && (bool)mv;
         object ov;
-        if (inp != null && inp.TryGetValue("options", out ov) && ov is List<object>) {
+        if (d.TryGetValue("options", out ov) && ov is List<object>) {
             foreach (object it in (List<object>)ov) {
                 var od = it as Dictionary<string, object>;
                 if (od == null) continue;
                 string lb = H.S(od, "label"); if (string.IsNullOrEmpty(lb)) continue;
                 string de = H.S(od, "description"); if (de == null) de = "";
-                opts.Add(new string[] { lb, de });
-                if (opts.Count >= 4) break;
+                string pv = H.S(od, "preview"); if (pv == null) pv = "";
+                a.Opts.Add(new string[] { lb, de, pv });
+                if (a.Opts.Count >= 4) break;
             }
         }
-        if (string.IsNullOrEmpty(question)) return "ERRO: preencha 'question' (a pergunta completa, terminando em ?).";
-        if (opts.Count < 2) return "ERRO: ofereça de 2 a 4 opções em 'options' (cada uma {label, description}).";
-        string ans = GateAsk(question, header, multi, opts, ct);
-        if (ans == null) return "O usuário cancelou ou não respondeu à pergunta. NÃO pergunte de novo: tome a decisão mais conservadora (ou nenhuma) e informe o que decidiu.";
-        if (ans.StartsWith("TEXTO:")) return "O usuário respondeu com texto livre: \"" + ans.Substring(6).Trim() + "\"";
-        if (ans.StartsWith("ESCOLHA:")) return "O usuário escolheu: " + ans.Substring(8).Trim().Replace(" | ", " e ") + ".";
-        return "O usuário respondeu: " + ans;
+        if (a.Opts.Count < 2) return null;
+        return a;
     }
 
     // ---------- compactacao da conversa (resumo das trocas antigas) ----------
@@ -569,7 +660,12 @@ public class Engine {
     // cancelamento (botao Parar / Esc / nova conversa): o que ja chegou fica no card
     void StopCancelled() { Emit("stopped", ""); Emit("done", ""); }
 
-    class Blk { public string Kind; public StringBuilder Text = new StringBuilder(); public string Id; public string Name; public StringBuilder Input = new StringBuilder(); }
+    class Blk {
+        public string Kind; public StringBuilder Text = new StringBuilder(); public string Id; public string Name; public StringBuilder Input = new StringBuilder();
+        public bool Live;      // texto ja esta' sendo mostrado no card (delta emitido)
+        public bool Trace;     // texto = banner da busca server Z.ai (descarta no card E no historico)
+        public string Raw;     // bloco do servidor (server_tool_use/tool_result): JSON cru p/ replay
+    }
 
     // heuristica leve: pergunta com cara de fato atual -> vale pre-buscar em paralelo
     static readonly string[] FreshKeys = new string[] {
@@ -610,6 +706,7 @@ public class Engine {
         try {
             lock (_sync) {
                 _useBig = false;
+                _planOk = false;   // aprovacao de plano vale so' ate' o fim do turno
                 _useVision = _auto && imgB64 != null && imgB64.Count > 0;   // imagem em auto -> modelo com visao
                 // anexo de TEXTO sem imagem -> modelo grande: o flash ignora o conteudo
                 // inline e sai "procurando" o arquivo no disco (10x file_list, resposta
@@ -660,7 +757,14 @@ public class Engine {
             // responder em 1 ida (~6s de fila) em vez de 3 (decidir->buscar->responder).
             string sys0 = sys;
             bool noImg = imgB64 == null || imgB64.Count == 0;
-            if (noImg && LooksFresh(userText)) {
+            if (noImg && LooksFresh(userText) && _srvSearch) {
+                // busca server-side Z.ai: o proprio servidor roda web_search_prime no
+                // /v1/messages (11-16s, qualidade alta, recency filter automatico) —
+                // pre-buscar Bing em paralelo seria custo morto; so' sobe pro big
+                if (_auto) _useBig = true;
+                Emit("status", "\U0001F310 busca Z.ai (no servidor)…");
+            }
+            else if (noImg && LooksFresh(userText)) {
                 // fato atual -> quem responde e' o modelo grande: segue instrucao melhor
                 // ("responda direto com os resultados") e faz buscas mais certeiras que o flash
                 if (_auto) _useBig = true;
@@ -694,6 +798,22 @@ public class Engine {
                     bool streamed = false;
                     try { blocks = StreamOnce(body, ct, out stop, out streamed); break; }
                     catch (Exception ex) {
+                        // provedor rejeitou a busca server-side (400) -> desliga e refaz
+                        // o body com web_search cliente (1x; sonda 13/10: Z.ai aceita,
+                        // mas perfis genericos podem nao)
+                        if (_srvSearch && ex.Message.StartsWith("HTTP 400")) {
+                            _srvSearch = false;
+                            Emit("note", "busca server não aceita pelo provedor — usando Bing");
+                            body = BuildBody(round == 0 ? sys0 : sys);
+                            continue;
+                        }
+                        // idem cache_control (aceito pela Z.ai; outro endpoint pode nao)
+                        if (_cacheCtl && ex.Message.StartsWith("HTTP 400")) {
+                            _cacheCtl = false;
+                            Emit("note", "cache_control não aceito — reenviando sem");
+                            body = BuildBody(round == 0 ? sys0 : sys);
+                            continue;
+                        }
                         // endpoint rejeitou os document blocks de PDF -> reenvia sem (1x)
                         if (_pdfFallback != null && ex.Message.StartsWith("HTTP 400")) {
                             lock (_sync) { if (_history.Count > 0) _history[_history.Count - 1] = _pdfFallback; _pdfFallback = null; }
@@ -713,7 +833,7 @@ public class Engine {
                 if (pdfRetry) { round--; continue; }
                 if (ct.IsCancellationRequested) { StopCancelled(); return; }
                 List<string> bj = new List<string>();
-                foreach (Blk b in blocks) bj.Add(BlkJson(b));
+                foreach (Blk b in blocks) { string j2 = BlkJson(b); if (j2 != null) bj.Add(j2); }
                 lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"); }
                 if (stop != "tool_use" || ct.IsCancellationRequested) { Emit("done", ""); return; }
                 // executa tools
@@ -733,6 +853,26 @@ public class Engine {
                     else if (b.Name == "web_search") { Emit("status", "\U0001F50D " + (q ?? "?")); outp = DoSearch(q, ct, sources); }
                     else if (b.Name == "fetch_page") { Emit("status", "\U0001F4C4 " + (u ?? "?")); outp = DoFetch(u, ct); }
                     else if (b.Name == "ask_user") { Emit("status", "❓ esperando sua escolha…"); outp = DoAskUser(inp, ct); }
+                    else if (b.Name == "plan") {
+                        string title = H.S(inp, "title");
+                        var steps = new List<string>();
+                        object sv;
+                        if (inp != null && inp.TryGetValue("steps", out sv) && sv is List<object>)
+                            foreach (object x in (List<object>)sv) {
+                                string s2 = x as string; if (string.IsNullOrEmpty(s2) || s2.Trim().Length == 0) continue;
+                                steps.Add(s2.Trim()); if (steps.Count >= 8) break;
+                            }
+                        if (string.IsNullOrEmpty(title) || steps.Count == 0) outp = "ERRO: envie 'title' (resumo curto) e 'steps' (array de 1-8 passos curtos, verbo + objeto).";
+                        else {
+                            Emit("status", "\U0001F9ED plano proposto — aguardando sua decisão…");
+                            if (GatePlan(title, steps, ct)) {
+                                _planOk = true;
+                                outp = "APROVADO pelo usuário. Execute os passos AGORA, em ordem, SEM pedir confirmação individual (o lote já foi aprovado; a janela aprova sozinha). Ao final, entregue um resumo curto do que fez.";
+                            } else {
+                                outp = "REJEITADO pelo usuário. NÃO execute as ações planejadas. Ajuste o plano (ou pergunte com ask_user o que ele prefere) e proponha de novo; só ações de leitura (file_list/file_read/file_grep/web_search) seguem liberadas.";
+                            }
+                        }
+                    }
                     else if (b.Name == "escalate") {
                         _useBig = true;
                         Emit("status", "↗ encaminhando ao " + _big + "…");
@@ -755,26 +895,44 @@ public class Engine {
     string BuildBody(string sys) {
         var b = new StringBuilder();
         string vm = !_auto ? _model : (_useBig ? _big : (_useVision ? (_vision ?? _big) : _model));
+        // system como array + cache_control no prefixo gordo: sonda 13/10 provou
+        // cache real no endpoint Z.ai (1550 -> 14 input tokens, 1536 cache_read)
+        string sysJson = _cacheCtl
+            ? "[{\"type\":\"text\",\"text\":" + J(sys) + ",\"cache_control\":{\"type\":\"ephemeral\"}}]"
+            : J(sys);
+        var tools = new List<string>();
+        if (_srvSearch)
+            // server tool Z.ai: declarar no tools faz o SERVIDOR rodar web_search_prime
+            // dentro do /v1/messages (blocos server_tool_use/tool_result chegam no
+            // stream; usage web_search_requests: 0 nas sondas — sem cobranca aparente)
+            tools.Add("{\"type\":\"web_search_20250305\",\"name\":\"web_search\"}");
+        else
+            tools.Add("{\"name\":\"web_search\",\"description\":\"Search the web for current information (news, prices, scores, versions, facts that may have changed). Returns numbered results with title, URL and snippet.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"the search query, in the same language as the question\"}},\"required\":[\"query\"]}}");
+        tools.Add("{\"name\":\"fetch_page\",\"description\":\"Fetch one web page by absolute http(s) URL and return its readable text (truncated). Use to read details of a promising search result.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"absolute http or https URL\"}},\"required\":[\"url\"]}}");
+        tools.Add("{\"name\":\"file_list\",\"description\":\"List files and folders of a directory on the user's Windows.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute directory path (empty = user home)\"}}}}");
+        tools.Add("{\"name\":\"file_read\",\"description\":\"Read a text file from the user's Windows (first 8000 chars).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"}},\"required\":[\"path\"]}}");
+        tools.Add("{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (content search, recursive): returns the matching lines as file:line: text. Use it to find where a term/name/config is defined or used — far cheaper than reading files one by one.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"text or regular expression to find in file contents\"},\"path\":{\"type\":\"string\",\"description\":\"absolute folder path to search in (empty = user home)\"},\"glob\":{\"type\":\"string\",\"description\":\"filename filter like *.ps1 or *.txt (empty = all files)\"}},\"required\":[\"pattern\"]}}");
+        tools.Add("{\"name\":\"file_edit\",\"description\":\"Surgically replace one exact text snippet inside an existing file (find & replace; the user approves a red/green diff). old_str must match the file EXACTLY, including indentation and line breaks — include surrounding lines to make it unique, or set replace_all:true. new_str empty deletes the snippet. ALWAYS prefer this over file_write for changing an existing file. Previous version kept as <file>.zquick.bak.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"old_str\":{\"type\":\"string\",\"description\":\"exact text to replace, copied from file_read (indentation counts)\"},\"new_str\":{\"type\":\"string\",\"description\":\"replacement text (empty string = delete old_str)\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"true = replace every occurrence of old_str\"}},\"required\":[\"path\",\"old_str\",\"new_str\"]}}");
+        tools.Add("{\"name\":\"file_write\",\"description\":\"Create or overwrite a whole text file (any extension). For CHANGING an existing file prefer file_edit (surgical, cheaper, shows a diff). Requires the user's approval; previous version kept as <file>.zquick.bak; result verified by re-reading.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}");
+        tools.Add("{\"name\":\"file_move\",\"description\":\"Move or RENAME a file or folder. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\",\"description\":\"absolute source path\"},\"dest\":{\"type\":\"string\",\"description\":\"absolute destination path (full new name)\"}},\"required\":[\"src\",\"dest\"]}}");
+        tools.Add("{\"name\":\"file_delete\",\"description\":\"Send a file or folder to the Recycle Bin. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute path\"}},\"required\":[\"path\"]}}");
+        tools.Add("{\"name\":\"note_add\",\"description\":\"Save a markdown note to the user's notes folder (Documents/ZQuick-Notas). Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\",\"description\":\"markdown body\"}},\"required\":[\"title\",\"content\"]}}");
+        tools.Add("{\"name\":\"memory_save\",\"description\":\"Save ONE durable fact about the user, their machines, servers, paths or preferences to the persistent memory, loaded into EVERY future conversation. Use for things you would otherwise need to ask again (e.g. 'meu servidor de planilhas é 192.168.0.99', 'prefiro respostas curtas'). Do NOT save conversation-specific content. Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\",\"description\":\"the fact, 1-2 sentences in Portuguese, self-contained\"}},\"required\":[\"fact\"]}}");
+        tools.Add("{\"name\":\"run_ps\",\"description\":\"Run a PowerShell command on the user's Windows (open apps, system settings, processes, checks...). Commands run in ONE PERSISTENT session per conversation: current directory, variables and functions SURVIVE between calls (set $x in one call, read $x in the next). ALWAYS shown to the user for approval before running. Optional 'timeout' in seconds (5-120, default 60). Do NOT delete user files with this (use file_delete). Keep commands short.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"PowerShell command line\"},\"timeout\":{\"type\":\"number\",\"description\":\"max seconds to wait, 5-120 (default 60)\"}},\"required\":[\"command\"]}}");
+        tools.Add("{\"name\":\"ask_user\",\"description\":\"Ask the user multiple-choice questions (ONE or up to 4 at once) and wait for their picks. Use when the task has ambiguity or decisions the user should make (which approach, which file, scope, taste, a risky trade-off). Do NOT use it for anything you can decide yourself or verify with file_list/web_search, and never ask the same question twice. Send one question via question/header/multiSelect/options, or several via questions:[{question, header, multiSelect, options}] (max 4). 2-4 options each; each option: short label (1-5 words) + description of what it implies; optional 'preview' (mono text — code snippet, mockup or config shown beside the option; use it when comparing concrete artifacts). The user can always answer free text instead.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"the complete question in Portuguese, specific, ending with ?\"},\"header\":{\"type\":\"string\",\"description\":\"short chip label, max ~12 chars\"},\"multiSelect\":{\"type\":\"boolean\",\"description\":\"true = the user may pick several options\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"description\":\"concise option, 1-5 words\"},\"description\":{\"type\":\"string\",\"description\":\"what choosing this implies\"},\"preview\":{\"type\":\"string\",\"description\":\"mono preview shown beside the option (code/mockup/config)\"}},\"required\":[\"label\"]}},\"questions\":{\"type\":\"array\",\"description\":\"alternative: up to 4 questions at once\",\"items\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"},\"header\":{\"type\":\"string\"},\"multiSelect\":{\"type\":\"boolean\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"preview\":{\"type\":\"string\"}},\"required\":[\"label\"]}}},\"required\":[\"question\",\"options\"]}}},\"required\":[\"question\",\"options\"]}}");
+        tools.Add("{\"name\":\"plan\",\"description\":\"Propose a multi-step plan of ACTIONS (create/edit/move/delete files, run commands) and wait for the user's approval ONCE. Approved: every listed action runs in this turn WITHOUT individual confirmations. Rejected: nothing runs. Use when the task needs 3+ steps that alter files or the system. Do NOT use it for read-only exploration or single actions.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\",\"description\":\"short plan title in Portuguese\"},\"steps\":{\"type\":\"array\",\"description\":\"ordered steps, each short (verb + object)\",\"items\":{\"type\":\"string\"}}},\"required\":[\"title\",\"steps\"]}}");
+        if (_auto && !_useBig && !_useVision) // vision-routed nao oferece escalate: o big nao enxerga
+            tools.Add("{\"name\":\"escalate\",\"description\":\"Hand the question over to the larger, smarter model. Call this when the user's question needs deep reasoning, careful multi-step analysis, long code, or when you feel your answer would be noticeably better from a stronger model. Do NOT call it for quick factual questions, simple lookups, translations or chit-chat.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"short reason in Portuguese\"}}}}");
+        if (_cacheCtl) {
+            // cache_control na ULTIMA tool: o cache cobre o prefixo inteiro (system+tools)
+            int last = tools.Count - 1;
+            tools[last] = tools[last].Substring(0, tools[last].Length - 1) + ",\"cache_control\":{\"type\":\"ephemeral\"}}";
+        }
         b.Append("{\"model\":\"").Append(vm)
          .Append("\",\"max_tokens\":").Append(_maxTokens)
-         .Append(",\"stream\":true,\"system\":").Append(J(sys))
-         .Append(",\"tools\":[")
-         .Append("{\"name\":\"web_search\",\"description\":\"Search the web for current information (news, prices, scores, versions, facts that may have changed). Returns numbered results with title, URL and snippet.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"the search query, in the same language as the question\"}},\"required\":[\"query\"]}},")
-         .Append("{\"name\":\"fetch_page\",\"description\":\"Fetch one web page by absolute http(s) URL and return its readable text (truncated). Use to read details of a promising search result.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"absolute http or https URL\"}},\"required\":[\"url\"]}}")
-         .Append(",{\"name\":\"file_list\",\"description\":\"List files and folders of a directory on the user's Windows.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute directory path (empty = user home)\"}}}}")
-         .Append(",{\"name\":\"file_read\",\"description\":\"Read a text file from the user's Windows (first 8000 chars).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"}},\"required\":[\"path\"]}}")
-         .Append(",{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (content search, recursive): returns the matching lines as file:line: text. Use it to find where a term/name/config is defined or used — far cheaper than reading files one by one.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"text or regular expression to find in file contents\"},\"path\":{\"type\":\"string\",\"description\":\"absolute folder path to search in (empty = user home)\"},\"glob\":{\"type\":\"string\",\"description\":\"filename filter like *.ps1 or *.txt (empty = all files)\"}},\"required\":[\"pattern\"]}}")
-         .Append(",{\"name\":\"file_edit\",\"description\":\"Surgically replace one exact text snippet inside an existing file (find & replace; the user approves a red/green diff). old_str must match the file EXACTLY, including indentation and line breaks — include surrounding lines to make it unique, or set replace_all:true. new_str empty deletes the snippet. ALWAYS prefer this over file_write for changing an existing file. Previous version kept as <file>.zquick.bak.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"old_str\":{\"type\":\"string\",\"description\":\"exact text to replace, copied from file_read (indentation counts)\"},\"new_str\":{\"type\":\"string\",\"description\":\"replacement text (empty string = delete old_str)\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"true = replace every occurrence of old_str\"}},\"required\":[\"path\",\"old_str\",\"new_str\"]}}")
-         .Append(",{\"name\":\"file_write\",\"description\":\"Create or overwrite a whole text file (any extension). For CHANGING an existing file prefer file_edit (surgical, cheaper, shows a diff). Requires the user's approval; previous version kept as <file>.zquick.bak; result verified by re-reading.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}")
-         .Append(",{\"name\":\"file_move\",\"description\":\"Move or RENAME a file or folder. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\",\"description\":\"absolute source path\"},\"dest\":{\"type\":\"string\",\"description\":\"absolute destination path (full new name)\"}},\"required\":[\"src\",\"dest\"]}}")
-         .Append(",{\"name\":\"file_delete\",\"description\":\"Send a file or folder to the Recycle Bin. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute path\"}},\"required\":[\"path\"]}}")
-         .Append(",{\"name\":\"note_add\",\"description\":\"Save a markdown note to the user's notes folder (Documents/ZQuick-Notas). Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\",\"description\":\"markdown body\"}},\"required\":[\"title\",\"content\"]}}")
-         .Append(",{\"name\":\"memory_save\",\"description\":\"Save ONE durable fact about the user, their machines, servers, paths or preferences to the persistent memory, loaded into EVERY future conversation. Use for things you would otherwise need to ask again (e.g. 'meu servidor de planilhas é 192.168.0.99', 'prefiro respostas curtas'). Do NOT save conversation-specific content. Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\",\"description\":\"the fact, 1-2 sentences in Portuguese, self-contained\"}},\"required\":[\"fact\"]}}")
-         .Append(",{\"name\":\"run_ps\",\"description\":\"Run ANY PowerShell command on the user's Windows (open apps, system settings, processes, checks...). ALWAYS shown to the user for approval before running. Do NOT delete user files with this (use file_delete). Keep commands short and idempotent.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"PowerShell command line\"}},\"required\":[\"command\"]}}")
-         .Append(",{\"name\":\"ask_user\",\"description\":\"Ask the user ONE multiple-choice question and wait for their pick. Use when the task has ambiguity or a decision the user should make (which approach, which file, scope, taste, a risky trade-off). Do NOT use it for anything you can decide yourself or verify with file_list/web_search, and never ask the same question twice. 2-4 options, each with a short label (1-5 words) and a description of what it implies; the user can always answer free text instead.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"the complete question in Portuguese, specific, ending with ?\"},\"header\":{\"type\":\"string\",\"description\":\"short chip label, max ~12 chars\"},\"multiSelect\":{\"type\":\"boolean\",\"description\":\"true = the user may pick several options\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"description\":\"concise option, 1-5 words\"},\"description\":{\"type\":\"string\",\"description\":\"what choosing this implies\"}},\"required\":[\"label\"]}}},\"required\":[\"question\",\"options\"]}}");
-        if (_auto && !_useBig && !_useVision) // vision-routed nao oferece escalate: o big nao enxerga
-            b.Append(",{\"name\":\"escalate\",\"description\":\"Hand the question over to the larger, smarter model. Call this when the user's question needs deep reasoning, careful multi-step analysis, long code, or when you feel your answer would be noticeably better from a stronger model. Do NOT call it for quick factual questions, simple lookups, translations or chit-chat.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"short reason in Portuguese\"}}}}");
-        b.Append("],\"messages\":[");
+         .Append(",\"stream\":true,\"system\":").Append(sysJson)
+         .Append(",\"tools\":[").Append(string.Join(",", tools.ToArray()))
+         .Append("],\"messages\":[");
         var msgs = new List<string>(_history);
         if (_specInject != null && msgs.Count > 0) {
             // costura a pre-busca como bloco extra no fim da ultima msg do usuario (round 0)
@@ -824,8 +982,30 @@ public class Engine {
                             Dictionary<string, object> cb = H.O(root, "content_block");
                             string k = H.S(cb, "type");
                             Blk blk = new Blk(); blk.Kind = k;
-                            if (k == "tool_use") { blk.Id = H.S(cb, "id"); blk.Name = H.S(cb, "name"); }
+                            if (k == "tool_use" || k == "server_tool_use") {
+                                blk.Id = H.S(cb, "id"); blk.Name = H.S(cb, "name");
+                                Dictionary<string, object> inpd = H.O(cb, "input");
+                                if (inpd != null && inpd.Count > 0) blk.Input.Append(ToJson(inpd));   // server tool pode entregar o input inteiro no start
+                            }
+                            else if (k == "tool_result") {   // resultado da busca server-side (vem DENTRO da msg do assistente)
+                                blk.Raw = ToJson(cb);                 // volta cru pro historico na proxima ida
+                                HarvestSources(H.S(cb, "content"));   // "[[{title,link,content}]]" -> rodape Fontes
+                            }
                             blocks[idx] = blk;
+                        } else if (typ == "content_block_stop") {
+                            int idx = (int)H.N(root, "index");
+                            Blk blk;
+                            if (blocks.TryGetValue(idx, out blk)) {
+                                if (blk.Kind == "text" && !blk.Trace && !blk.Live && blk.Text.Length > 0) {
+                                    if (SrvTrace(blk.Text.ToString())) blk.Trace = true;   // bloco curto sintetizado
+                                    else { blk.Live = true; Emit("delta", blk.Text.ToString()); }   // bloco curto que comeca com '*': decide so' no fim
+                                }
+                                if (blk.Kind == "server_tool_use") {   // loga a query real da busca server
+                                    Dictionary<string, object> sq = MJ.Parse(blk.Input.ToString()) as Dictionary<string, object>;
+                                    string q2 = sq != null ? H.S(sq, "search_query") : null; if (q2 == null && sq != null) q2 = H.S(sq, "query");
+                                    Emit("status", "\U0001F50D " + (string.IsNullOrEmpty(q2) ? (blk.Name ?? "busca server") : q2));
+                                }
+                            }
                         } else if (typ == "content_block_delta") {
                             int idx = (int)H.N(root, "index");
                             Blk blk;
@@ -836,7 +1016,21 @@ public class Engine {
                                 string tx = H.S(del, "text"); if (tx == null) tx = "";
                                 if (ttft < 0) { ttft = swt.Elapsed.TotalSeconds; Emit("note", string.Format("1º token em {0:0.0}s", ttft)); }
                                 streamed = true;
-                                blk.Text.Append(tx); Emit("delta", tx);
+                                blk.Text.Append(tx);
+                                if (blk.Kind == "text") {
+                                    if (blk.Live) Emit("delta", tx);
+                                    else if (!blk.Trace) {
+                                        // filtro dos blocos SINTETIZADOS pelo servidor Z.ai: o banner
+                                        // "**<globo> Z.ai Built-in Tool**" e o dump "**Output:** **web_search_prime
+                                        // _result_summary:** [{...}" — nao vai pro card nem pro historico
+                                        string sofar = blk.Text.ToString();
+                                        if (!sofar.StartsWith("*")) { blk.Live = true; Emit("delta", sofar); }
+                                        else if (sofar.Length >= 24) {
+                                            if (SrvTrace(sofar)) blk.Trace = true;
+                                            else { blk.Live = true; Emit("delta", sofar); }
+                                        }
+                                    }
+                                }
                             } else if (dk == "input_json_delta") {
                                 string pj = H.S(del, "partial_json"); if (pj != null) blk.Input.Append(pj);
                             }
@@ -865,7 +1059,12 @@ public class Engine {
     }
 
     string BlkJson(Blk b) {
-        if (b.Kind == "text") return "{\"type\":\"text\",\"text\":" + J(b.Text.ToString()) + "}";
+        if (b.Kind == "text") {
+            if (b.Trace || b.Text.Length == 0) return null;   // banner Z.ai / texto vazio: fora do historico
+            return "{\"type\":\"text\",\"text\":" + J(b.Text.ToString()) + "}";
+        }
+        if (b.Kind == "thinking") return null;   // raciocinio interno: nunca reenvia
+        if (b.Kind == "server_tool_use" || b.Kind == "tool_result") return b.Raw;   // bloco gerado pelo servidor: volta como veio
         string inp = b.Input.ToString().Trim(); if (inp.Length == 0) inp = "{}";
         return "{\"type\":\"tool_use\",\"id\":" + J(b.Id) + ",\"name\":" + J(b.Name) + ",\"input\":" + inp + "}";
     }
@@ -1114,8 +1313,11 @@ public class Engine {
             if (name == "run_ps") {
                 string cmd = H.S(inp, "command");
                 if (string.IsNullOrEmpty(cmd)) return "ERRO: command obrigatório";
-                if (!GateConfirm("run_ps", cmd, "Comando PowerShell", cmd, null, ct)) return "NEGADO pelo usuário.";
-                return RunPs(cmd);
+                double tmoD = H.N(inp, "timeout");
+                int tmo = tmoD < 0 ? 60 : (int)tmoD;
+                if (tmo < 5) tmo = 5; if (tmo > 120) tmo = 120;
+                if (!GateConfirm("run_ps", cmd, "Comando PowerShell (sessão persistente)", cmd, null, ct)) return "NEGADO pelo usuário.";
+                return RunPsSession(cmd, tmo);
             }
             return "unknown tool";
         } catch (Exception ex) { return "ERRO: " + ex.Message; }
@@ -1171,6 +1373,178 @@ public class Engine {
         } catch (Exception ex) { return "ERRO: " + ex.Message; }
     }
 
+    // ---------- sessao de shell persistente (#3) ----------
+    // Processo filho vivo com pipes redirecionados: cwd, variaveis, funcoes e
+    // imports sobrevivem entre chamadas run_ps da MESMA conversa. Reset/New-Conversation
+    // (KillShell) fecha a sessao. Protocolo: comando em base64 UTF-16LE (linha 100%
+    // ASCII) + sentinela __ZQEND__<tag>|<cwd>|<exitcode> no fim da saida.
+    readonly System.Collections.Concurrent.ConcurrentQueue<string> _shOutQ = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+    void KillShell() {
+        lock (_shLock) {
+            try { if (_shIn != null) _shIn.Close(); } catch {}
+            try { if (_sh != null) { if (!_sh.HasExited) _sh.Kill(); _sh.Dispose(); } } catch {}
+            _sh = null; _shIn = null; _shOut = null; _shErr = null;
+            string d; while (_shOutQ.TryDequeue(out d)) { }
+            _shErrBuf.Clear();
+        }
+    }
+
+    void OutPump(object arg) {
+        StreamReader sr = (StreamReader)arg;
+        try { while (true) { string l = sr.ReadLine(); if (l == null) break; _shOutQ.Enqueue(l); } } catch { }
+    }
+    void ErrPump(object arg) {
+        StreamReader sr = (StreamReader)arg;
+        try {
+            while (true) {
+                string l = sr.ReadLine();
+                if (l == null) break;
+                lock (_shLock) _shErrBuf.Add(l);
+            }
+        } catch { }
+    }
+
+    bool EnsureShell() {
+        lock (_shLock) {
+            if (_sh != null && !_sh.HasExited) return true;
+            try { if (_sh != null) { if (!_sh.HasExited) _sh.Kill(); _sh.Dispose(); } } catch {}
+            string d; while (_shOutQ.TryDequeue(out d)) { }
+            _shErrBuf.Clear();
+            string ps = string.IsNullOrEmpty(PsExe) ? "powershell.exe" : PsExe;
+            var psi = new System.Diagnostics.ProcessStartInfo(ps, "-NoProfile -NoLogo -NonInteractive -ExecutionPolicy Bypass");
+            psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            psi.UseShellExecute = false; psi.CreateNoWindow = true;
+            psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = Encoding.UTF8; psi.StandardErrorEncoding = Encoding.UTF8;
+            _sh = System.Diagnostics.Process.Start(psi);
+            _shIn = _sh.StandardInput; _shOut = _sh.StandardOutput; _shErr = _sh.StandardError;
+            _shIn.AutoFlush = true;
+            Thread ot = new Thread(OutPump); ot.IsBackground = true; ot.Start(_shOut);
+            Thread et = new Thread(ErrPump); et.IsBackground = true; et.Start(_shErr);
+        }
+        // init: UTF8 nas duas pontas + sem barra de progresso (sujaria o pipe)
+        string init = ShRun("[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'", 15);
+        return !init.StartsWith("TIMEOUT") && !init.StartsWith("ERRO");
+    }
+
+    string ShRun(string cmd, int timeoutSec) {
+        string tag = Guid.NewGuid().ToString("N").Substring(0, 10);
+        string b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(cmd));
+        // PARENTESES no argumento do Invoke-Expression: em modo-argumento o parser
+        // quebra "X.Y(Z)" em 2 parametros posicionais (Byte[]) sem eles (repro 13/10)
+        string line = "Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String(\"" + b64
+            + "\"))); Write-Output (\"__ZQEND__" + tag + "|\" + (Get-Location).Path + \"|\" + $(if ($null -eq $LASTEXITCODE) { 'ps' } else { $LASTEXITCODE }))";
+        string d;
+        while (_shOutQ.TryDequeue(out d)) { }   // descarta prompts/sobras do comando anterior
+        _shIn.WriteLine(line);
+        var sb = new StringBuilder();
+        string cwd = null, exit = "ps";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed.TotalSeconds < timeoutSec) {
+            string l = null;
+            if (_shOutQ.TryDequeue(out l)) {
+                if (l.StartsWith("__ZQEND__" + tag + "|")) {
+                    int p1 = l.IndexOf('|');
+                    int p2 = l.LastIndexOf('|');
+                    cwd = p2 > p1 ? l.Substring(p1 + 1, p2 - p1 - 1) : l.Substring(p1 + 1);
+                    exit = l.Substring(p2 + 1);
+                    break;
+                }
+                // o filho pwsh ECOA "PS <cwd>> <linha enviada>" (com o base64) e prompts
+                // "PS <cwd>>" no stdout redirecionado — fora da saida util
+                if (l.StartsWith("PS ") && (l.IndexOf(b64, StringComparison.Ordinal) >= 0 || l.TrimEnd().EndsWith(">"))) continue;
+                sb.Append(l).Append('\n');
+                if (sb.Length > 60000) { sb.Length = 59990; sb.Append("…\n"); }
+            } else Thread.Sleep(25);
+        }
+        if (cwd == null) {
+            KillShell();
+            return "TIMEOUT (" + timeoutSec + "s) — sessão reiniciada. Saída até ali:\n" + Trunc(sb.ToString(), 4000);
+        }
+        Thread.Sleep(30);   // deixa o stderr da vez chegar no pump
+        string errs;
+        lock (_shLock) { errs = string.Join("\n", _shErrBuf.ToArray()); _shErrBuf.Clear(); }
+        return "EXIT " + (exit.Length == 0 ? "ps" : exit)
+             + (string.IsNullOrEmpty(errs) ? "" : "\n[stderr]\n" + Trunc(errs, 2000))
+             + "\n" + (sb.Length > 0 ? Trunc(sb.ToString().TrimEnd('\n'), 8000) : "(sem saída)")
+             + "\n[cwd: " + cwd + "]";
+    }
+
+    string RunPsSession(string cmd, int timeoutSec) {
+        try {
+            if (!EnsureShell()) return "ERRO: sessão persistente não subiu — comando avulso:\n" + RunPs(cmd);
+            return "PS (sessão persistente)\n" + ShRun(cmd, timeoutSec);
+        } catch (Exception ex) {
+            KillShell();
+            return "ERRO na sessão (" + ex.Message + ") — comando avulso:\n" + RunPs(cmd);
+        }
+    }
+
+    // ---------- serializador JSON p/ blocos do servidor (replay) e seeds ----------
+    static string ToJson(object o) {
+        if (o == null) return "null";
+        if (o is string) return J((string)o);
+        if (o is bool) return ((bool)o) ? "true" : "false";
+        if (o is double) {
+            double dd = (double)o;
+            if (dd == Math.Floor(dd) && Math.Abs(dd) < 9e15) return ((long)dd).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return dd.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (o is Dictionary<string, object>) {
+            var d = (Dictionary<string, object>)o;
+            var sb = new StringBuilder("{");
+            bool first = true;
+            foreach (KeyValuePair<string, object> kv in d) {
+                if (!first) sb.Append(",");
+                first = false;
+                sb.Append(J(kv.Key)).Append(":").Append(ToJson(kv.Value));
+            }
+            return sb.Append("}").ToString();
+        }
+        if (o is List<object>) {
+            var l = (List<object>)o;
+            var sb = new StringBuilder("[");
+            for (int i = 0; i < l.Count; i++) { if (i > 0) sb.Append(","); sb.Append(ToJson(l[i])); }
+            return sb.Append("]").ToString();
+        }
+        return J(o.ToString());
+    }
+
+    // content do tool_result da busca server: string JSON aninhada "[[{title,link,content,refer}]]"
+    void HarvestSources(string content) {
+        try {
+            if (string.IsNullOrEmpty(content)) return;
+            var found = new List<string[]>();
+            Collect(MJ.Parse(content), found);
+            var sb = new StringBuilder();
+            int n = 0;
+            foreach (string[] f in found) {
+                if (n > 0) sb.Append(",");
+                sb.Append(SourceJson(f[0], f[1]));
+                if (++n >= 6) break;
+            }
+            if (n > 0) Emit("sources", "[" + sb.ToString() + "]");
+        } catch { }
+    }
+    static void Collect(object o, List<string[]> found) {
+        if (o == null || found.Count >= 12) return;
+        var d = o as Dictionary<string, object>;
+        if (d != null) {
+            string title = H.S(d, "title"); if (title == null) title = "";
+            string url = H.S(d, "link"); if (url == null) url = H.S(d, "url"); if (url == null) url = H.S(d, "link_url");
+            if (url != null && url.StartsWith("http")) {
+                bool dup = false;
+                foreach (string[] x in found) if (x[1] == url) { dup = true; break; }
+                if (!dup) found.Add(new string[] { title, url });
+            }
+            foreach (KeyValuePair<string, object> kv in d) Collect(kv.Value, found);
+            return;
+        }
+        var l = o as List<object>;
+        if (l != null) foreach (object x in l) Collect(x, found);
+    }
+
     string HttpGet(string url, CancellationToken ct, int timeoutSec) {
         using (CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct)) {
             cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
@@ -1195,6 +1569,19 @@ public class Engine {
 
     static string SourceJson(string title, string url) {
         return "{\"title\":" + J(title ?? "") + ",\"url\":" + J(url ?? "") + "}";
+    }
+    // blocos de texto sintetizados pelo servidor Z.ai na busca server-side (nao sao
+    // resposta do modelo): banner "🌐 Z.ai Built-in Tool" e dump "Output:" (probe
+    // 13/10: vem como "**Output:**\n**web_search_prime_result_summary:**" — newline,
+    // nao espaco, entre os dois)
+    static bool SrvTrace(string s) {
+        if (string.IsNullOrEmpty(s)) return false;
+        if (s.StartsWith("**\U0001F310")) return true;
+        if (s.StartsWith("**Output:**")) {
+            string rest = s.Substring(11).TrimStart(' ', '\n', '\r', '\t');
+            return rest.StartsWith("**web_search");
+        }
+        return false;
     }
     static string Strip(string s) { return Regex.Replace(s ?? "", "<[^>]+>", "").Trim(); }
     static string Trunc(string s, int n) { if (s == null) s = ""; return s.Length > n ? s.Substring(0, n) + "…" : s; }
@@ -1244,7 +1631,7 @@ function New-EngineFromProfile {
     if ($models -notcontains $model) { $model = 'auto'; if ($models -notcontains 'auto' -and $models.Count -gt 0) { $model = $models[0] } }
     $eng = [ZQuick.Engine]::new($auth.base, $auth.key, $model,
         [string]$p.fastModel, [string]$p.bigModel,
-        [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue)
+        [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue, [bool]$cfg.promptCache)
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
     $eng.MemPath = $memFile
     $rules = @{ runPs = @(); paths = @() }
@@ -1291,11 +1678,13 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "file_write (cria/sobrescreve arquivo inteiro)/file_move/file_delete (alteram algo — o usuário autoriza cada uma na janela; apagar vai para a Lixeira), " +
      "note_add (grava nota em Documentos\\ZQuick-Notas, sem confirmação), " +
      "memory_save (grava fato DURÁVEL sobre o usuário/suas máquinas/preferências — vale para as próximas conversas; use quando aprender algo que vai precisar de novo e não for específico da conversa atual) " +
-     "e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; " +
+     "e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; os comandos rodam numa SESSÃO PERSISTENTE por conversa: pasta atual, variáveis e funções criadas numa chamada existem na seguinte; " +
      "NUNCA apague arquivos do usuário com run_ps, use file_delete). Se o usuário negar, informe e não repita a mesma ação. " +
+     "Caminho de arquivo ENTRE ASPS na mensagem do usuário = menção (@): o arquivo existe — leia com file_read/file_grep em vez de perguntar o que tem nele. " +
      "Quando a tarefa tiver ambiguidade ou decisão que cabe ao usuário (qual abordagem, qual arquivo, escopo, preferência), pergunte UMA vez com ask_user: " +
-     "2-4 opções de label curto + descrição do que a escolha implica; o usuário pode responder texto livre ou cancelar. " +
-     "Se ele cancelar/não responder, decida sozinho a opção mais conservadora e informe — não repita a pergunta. " +
+     "de 1 a 4 perguntas de uma vez (questions), cada uma com 2-4 opções de label curto + descrição do que a escolha implica; quando estiver comparando artefatos concretos (código, mockup, config), inclua 'preview' nas opções. " +
+     "O usuário pode responder texto livre ou cancelar; se cancelar/não responder, decida sozinho a opção mais conservadora e informe — não repita a pergunta. " +
+     "Antes de executar 3+ ações que ALTERAM arquivos ou o sistema (criar/editar/mover/apagar, comandos), PROponha com plan {title, steps[]}: o usuário aprova UMA vez e as ações rodam sem confirmação individual; se rejeitar, nada executa — replique o plano ajustado ou pergunte. " +
      "Ao mexer com arquivos, confirme os caminhos com file_list antes. " +
      "Formatação leve: negrito e listas simples quando ajudar, nada de títulos grandes.")
 }
@@ -1354,6 +1743,19 @@ $xamlStr = @'
             </StackPanel>
           </StackPanel>
         </Border>
+        <Border x:Name="PlanBar" Visibility="Collapsed" Background="#3A3A44" CornerRadius="6" Margin="14,6,14,0" Padding="10,8">
+          <StackPanel>
+            <TextBlock x:Name="PlanTitle" Foreground="#E8E8EC" FontWeight="SemiBold" FontSize="12" TextWrapping="Wrap"/>
+            <ScrollViewer MaxHeight="140" Margin="0,4,0,6" VerticalScrollBarVisibility="Auto"
+                          Background="#16161A" BorderBrush="#3A3A44" BorderThickness="1" Padding="6,4">
+              <StackPanel x:Name="PlanSteps"/>
+            </ScrollViewer>
+            <StackPanel Orientation="Horizontal">
+              <Button x:Name="PlanYes" Content="✅ Aprovar e executar" FontWeight="SemiBold"/>
+              <Button x:Name="PlanNo" Content="✕ Rejeitar" Margin="8,0,0,0"/>
+            </StackPanel>
+          </StackPanel>
+        </Border>
         <Border x:Name="AskBar" Visibility="Collapsed" Background="#3A3A44" CornerRadius="6" Margin="14,6,14,0" Padding="10,8">
           <StackPanel>
             <TextBlock x:Name="AskHeader" Foreground="#9A9AA5" FontSize="10" FontWeight="SemiBold" Text="DECISÃO"/>
@@ -1394,7 +1796,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -1518,15 +1920,25 @@ function Update-LiveAnswer {
 }
 
 function Show-Sources($json) {
+    # so' REGISTRA as fontes: os [n] da resposta viram link na hora. O rodape
+    # "Fontes:" e' desenhado uma unica vez no fim do turno (Add-SourcesFooter) —
+    # Update-LiveAnswer reconstruiria o livePanel a cada delta e apagaria o rodape.
     try {
         $arr = @(ConvertFrom-Json $json)
-        if ($arr.Count -eq 0 -or $null -eq $script:livePanel) { return }
+        if ($arr.Count -eq 0) { return }
         $script:pendSources = $arr
-        # Paragraph (FlowDocument) nao tem TextWrapping — quebra de linha e' nativa; so' margem
+        Log ('fontes: ' + $arr.Count)
+    } catch { Log "sources: $_" }
+}
+
+function Add-SourcesFooter {
+    # rodape "Fontes:" no fim do card — depois do ultimo Update-LiveAnswer do turno
+    try {
+        if (@($script:pendSources).Count -eq 0 -or $null -eq $script:livePanel) { return }
         $tb = [System.Windows.Documents.Paragraph]::new(); $tb.Margin = '0,6,0,0'
         $lbl = [System.Windows.Documents.Run]::new('Fontes: '); $lbl.Foreground = $T.dim; $tb.Inlines.Add($lbl) | Out-Null
         $i = 0
-        foreach ($s in $arr) {
+        foreach ($s in @($script:pendSources)) {
             $i++
             if ($i -gt 1) { $sep = [System.Windows.Documents.Run]::new(' · '); $sep.Foreground = $T.dim; $tb.Inlines.Add($sep) | Out-Null }
             $h = [System.Windows.Documents.Hyperlink]::new()
@@ -1536,7 +1948,7 @@ function Show-Sources($json) {
             $tb.Inlines.Add($h) | Out-Null
         }
         $script:livePanel.Add($tb) | Out-Null
-    } catch { Log "sources: $_" }
+    } catch { Log "sources-footer: $_" }
 }
 
 function Set-Busy([bool]$b) {
@@ -1550,6 +1962,7 @@ function Finish-Turn {
     if (-not $script:busy) { return }
     Set-Busy $false
     $ConfirmBar.Visibility = 'Collapsed'
+    $PlanBar.Visibility = 'Collapsed'
     $script:lastAnswer = $script:curAnswer
     $el = if ($script:sendTime -gt [datetime]::MinValue) { [int]((Get-Date) - $script:sendTime).TotalSeconds } else { 0 }
     $StatusText.Text = "Pronto • ${el}s"
@@ -1569,6 +1982,7 @@ function Finish-Turn {
             $script:livePanel.Add($sp) | Out-Null
         }
     }
+    Add-SourcesFooter
     Save-History
     Update-CtxMeter
     # mensagem na fila (digitada durante a resposta): envia sozinha. Timer 1-tiro
@@ -1727,6 +2141,40 @@ function Add-ImageFile($path) {
 function Send-Current {
     if (-not (Ensure-Engine)) { $InputBox.Focus() | Out-Null; return }
     $text = $InputBox.Text.Trim()
+    # /uitest: hooks de desenvolvimento — E2E deterministico dos paineis ask/plan
+    if ($text -eq '/uitest ask2') {
+        $InputBox.Clear()
+        Show-AskBar ([pscustomobject]@{
+            id = 99
+            qs = @(
+                @{ q = 'Qual formato do relatório?'; h = 'FORMATO'; multi = $false; opts = @(
+                    @{ label = 'Resumo'; desc = '1 parágrafo direto'; preview = "Total: R$ 1.234,56`nPagamentos: 12`nMês: out/2026" }
+                    @{ label = 'Detalhado'; desc = 'tabela completa'; preview = "| Data | Valor |`n|------|-------|`n| 01/10 | 100,00 |`n| 02/10 | 200,00 |" }
+                ) }
+                @{ q = 'Incluir o quê?'; h = 'ESCOPO'; multi = $true; opts = @(
+                    @{ label = 'Gráficos'; desc = 'gera PNGs' }
+                    @{ label = 'Fontes'; desc = 'links no fim' }
+                ) }
+            )
+        })
+        Log 'uitest: ask2'
+        return
+    }
+    if ($text -eq '/uitest plan') {
+        $InputBox.Clear()
+        Show-PlanBar ([pscustomobject]@{ id = 99; title = 'Teste de plano (uitest)'; steps = @('criar arquivo A na Desktop', 'criar arquivo B na Desktop', 'conferir os dois') })
+        Log 'uitest: plan'
+        return
+    }
+    if ($text -eq '/uitest at') {
+        # hook E2E do dialogo de mencao: chars INJETADOS nao viram texto nesta
+        # sessao (TSF descarta input injetado — so' keydown puro chega), então
+        # o PreviewTextInput nao e' acionavel por teste; o dialogo em si e' (13/10)
+        $InputBox.Clear()
+        Log 'uitest: at'
+        Open-MentionDialog | Out-Null
+        return
+    }
     $imgs = [System.Collections.Generic.List[string]]::new()
     $txtFiles = [System.Collections.Generic.List[string[]]]::new()
     $pdfs = [System.Collections.Generic.List[string[]]]::new()
@@ -1792,6 +2240,7 @@ function New-Conversation {
     $AnswerDoc.Blocks.Clear()
     $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
     $ConfirmBar.Visibility = 'Collapsed'
+    $PlanBar.Visibility = 'Collapsed'
     if ($AskBar.Visibility -eq 'Visible') { $script:askCard = $null; Hide-AskBar }
     $script:stopped = $false
     Set-Busy $false
@@ -2039,8 +2488,13 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; Update-LiveAnswer }
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|📄|↗|⚙|❓') { Log ('tool: ' + $m.Text) } }
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭') { Log ('tool: ' + $m.Text) } }
             'sources' { Show-Sources $m.Text }
+            'plan' {
+                try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
+                if ($c -and $c.hide) { Hide-PlanBar }
+                elseif ($c) { Show-PlanBar $c }
+            }
             'confirm' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("confirm-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
                 if ($c -and $c.hide) { $ConfirmBar.Visibility = 'Collapsed' }
@@ -2091,7 +2545,7 @@ $timer.Add_Tick({
                 } catch { Log "allow: $_" }
             }
             'ask' {
-                try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null }
+                try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("ask-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
                 if ($c -and $c.hide) { Hide-AskBar }
                 elseif ($c) { Show-AskBar $c }
             }
@@ -2127,6 +2581,7 @@ function Reset-Conversation {
     $script:convFile = $null; $script:convResumed = $false
     $AnswerDoc.Blocks.Clear()
     $ConfirmBar.Visibility = 'Collapsed'
+    $PlanBar.Visibility = 'Collapsed'
     if ($AskBar.Visibility -eq 'Visible') { $script:askCard = $null; Hide-AskBar }
     Add-Placeholder
     Log 'janela reaberta: conversa nova'
@@ -2218,6 +2673,55 @@ $ConfirmAlwaysBtn.Add_Click({
     $ConfirmBar.Visibility = 'Collapsed'; $StatusText.Text = 'sempre permitido — gravado no zquick.json'
 })
 
+# ---------- modo plano (#13): aprovacao em lote (uma vez, acoes seguintes sem confirm) ----------
+$script:planId = 0
+
+function Show-PlanBar($c) {
+    $script:planId = [int]$c.id
+    $PlanTitle.Text = [string]$c.title
+    $PlanSteps.Children.Clear()
+    $i = 0
+    foreach ($s in @($c.steps)) {
+        $i++
+        $tb = [System.Windows.Controls.TextBlock]::new()
+        $tb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
+        $tb.FontSize = 11; $tb.TextWrapping = 'Wrap'
+        $tb.Text = "$i. $([string]$s)"
+        $tb.Foreground = $(if ($i % 2 -eq 0) { $T.status } else { $T.fg })
+        $null = $PlanSteps.Children.Add($tb)
+    }
+    $PlanBar.Visibility = 'Visible'
+    if (-not $window.IsVisible) { Center-Window; $window.Show() }
+    [void]$window.Activate()
+    [void]$PlanYes.Focus()
+    # ecoa o plano na conversa (card proprio)
+    $card = New-Card '🧭 Plano proposto'
+    Add-MdLines $card.Blocks ('**' + [string]$c.title + '**') $false
+    foreach ($s in @($c.steps)) {
+        $p = [System.Windows.Documents.Paragraph]::new(); $p.Margin = '0,1'
+        $b = [System.Windows.Documents.Run]::new('• '); $b.Foreground = $T.dim
+        $null = $p.Inlines.Add($b)
+        $null = $p.Inlines.Add([System.Windows.Documents.Run]::new([string]$s))
+        $null = $card.Blocks.Add($p)
+    }
+    $AnswerDoc.Blocks.Add($card.Section) | Out-Null
+    Scroll-AnswerToEnd
+    Log ('plano: ' + [string]$c.title + ' (' + @($c.steps).Count + ' passos)')
+}
+
+function Hide-PlanBar { $PlanBar.Visibility = 'Collapsed' }
+
+$PlanYes.Add_Click({
+    if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $true) }
+    Hide-PlanBar; $StatusText.Text = '✅ plano aprovado — executando sem confirmações…'
+    Log 'plano: aprovado'
+})
+$PlanNo.Add_Click({
+    if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $false) }
+    Hide-PlanBar; $StatusText.Text = 'plano rejeitado'
+    Log 'plano: rejeitado'
+})
+
 # ---------- ask_user: painel de decisao multipla-escolha (estilo Claude Code) ----------
 $script:askId = 0; $script:askState = $null; $script:askCard = $null
 
@@ -2227,20 +2731,36 @@ function Hide-AskBar {
     $script:askState = $null
 }
 
+function Get-AskPretty([string]$answer) {
+    if ([string]::IsNullOrEmpty($answer)) { return '✕ cancelada' }
+    if ($answer.StartsWith('[')) {   # multi-pergunta: array ["ESCOLHA: x | y","TEXTO: t",""]
+        try {
+            $arr = @($answer | ConvertFrom-Json)
+            $outs = @()
+            foreach ($a in $arr) {
+                $s = [string]$a
+                if ($s.StartsWith('ESCOLHA:')) { $outs += '✅ ' + (($s.Substring(8).Trim()) -replace ' \| ', ' + ') }
+                elseif ($s.StartsWith('TEXTO:')) { $outs += '✎ ' + $s.Substring(6).Trim() }
+                else { $outs += '—' }
+            }
+            return ($outs -join ' · ')
+        } catch { return $answer }
+    }
+    if ($answer.StartsWith('TEXTO:')) { return '✎ ' + $answer.Substring(6).Trim() }
+    return '✅ ' + (($answer -replace '^ESCOLHA:\s*', '') -replace ' \| ', ' + ')
+}
+
 function Send-AskAnswer([string]$answer) {
     # $null/$vazio = cancelado (o engine trata como "nao respondeu")
     if ($script:engine) { $script:engine.AnswerAsk([int]$script:askId, $answer) }
     if ($script:askCard) {
         try {
             $p = [System.Windows.Documents.Paragraph]::new(); $p.Margin = '0,4,0,0'
-            $what = if ([string]::IsNullOrEmpty($answer)) { '✕ cancelada' }
-                    elseif ($answer.StartsWith('TEXTO:')) { '✎ ' + $answer.Substring(6).Trim() }
-                    else { '✅ ' + ($answer -replace '^ESCOLHA:\s*', '' -replace ' \| ', ' + ') }
-            $r = [System.Windows.Documents.Run]::new('Você: ' + $what)
+            $r = [System.Windows.Documents.Run]::new('Você: ' + (Get-AskPretty $answer))
             $r.Foreground = $T.q; $r.FontWeight = 'SemiBold'
             $null = $p.Inlines.Add($r)
             $script:askCard.Blocks.Add($p) | Out-Null
-            Log ('ask resposta: ' + $what)
+            Log ('ask resposta: ' + (Get-AskPretty $answer))
         } catch { Log "ask-eco: $_" }
     }
     $script:askCard = $null
@@ -2253,85 +2773,165 @@ function Show-AskBar($c) {
     # estado do painel: hashtable unica — closures de botao capturam POR VALOR
     # (referencia compartilhada); $script: dentro de GetNewClosure resolve no
     # escopo do modulo da closure, NAO no do script — nao usar la.
-    $st = @{ multi = [bool]$c.multi; sel = [System.Collections.ArrayList]::new() }
+    $qsArr = @($c.qs)
+    $qs = @()
+    foreach ($q in $qsArr) { $qs += @{ multi = [bool]$q.multi; sel = [System.Collections.ArrayList]::new(); freeBox = $null } }
+    $st = @{ qs = $qs }
     $script:askState = $st
-    $hdr = [string]$c.header; if (-not $hdr) { $hdr = 'decisão' }
+    $single = ($qs.Count -eq 1)
+    $hdr = if ($single) { [string]$qsArr[0].h } else { "$($qs.Count) PERGUNTAS" }
+    if (-not $hdr) { $hdr = 'decisão' }
     $AskHeader.Text = $hdr.ToUpperInvariant()
-    $AskTitle.Text = [string]$c.question
+    $AskTitle.Text = $(if ($single) { [string]$qsArr[0].q } else { 'Responda as perguntas e confirme — ou use ✎ para texto livre.' })
     $AskPanel.Children.Clear()
-    $i = 0
-    foreach ($o in @($c.options)) {
-        $i++
-        $lbl = [string]$o.label; $desc = [string]$o.desc
-        $btn = [System.Windows.Controls.Button]::new()
-        [System.Windows.Automation.AutomationProperties]::SetAutomationId($btn, "AskOpt$i")
-        $btn.Tag = $lbl
-        $btn.HorizontalContentAlignment = 'Left'
-        $btn.Padding = '10,6'; $btn.Margin = '0,2'
-        $sp = [System.Windows.Controls.StackPanel]::new()
-        $t1 = [System.Windows.Controls.TextBlock]::new(); $t1.Text = $lbl; $t1.FontWeight = 'SemiBold'; $t1.FontSize = 12
-        $null = $sp.Children.Add($t1)
-        if ($desc) {
-            $t2 = [System.Windows.Controls.TextBlock]::new(); $t2.Text = $desc
-            $t2.Foreground = $T.status; $t2.FontSize = 11; $t2.TextWrapping = 'Wrap'
-            $null = $sp.Children.Add($t2)
+    $needOk = -not $single
+    $qi = 0
+    foreach ($q in $qsArr) {
+        $qi++
+        $qst = $st.qs[$qi - 1]
+        if ($qst.multi) { $needOk = $true }
+        $immediate = ($single -and -not $qst.multi)   # 1 pergunta simples: clique envia direto (UX antiga)
+        $qsp = [System.Windows.Controls.StackPanel]::new(); $qsp.Margin = '0,0,0,6'
+        if (-not $single) {
+            $ht = [System.Windows.Controls.TextBlock]::new()
+            $ht.Text = "$qi · " + ([string]$q.h).ToUpperInvariant()
+            $ht.Foreground = $T.status; $ht.FontSize = 10; $ht.FontWeight = 'SemiBold'; $ht.Margin = '0,4,0,2'
+            $null = $qsp.Children.Add($ht)
+            $qt = [System.Windows.Controls.TextBlock]::new()
+            $qt.Text = [string]$q.q; $qt.Foreground = $T.fg; $qt.TextWrapping = 'Wrap'; $qt.FontSize = 12; $qt.FontWeight = 'SemiBold'
+            $null = $qsp.Children.Add($qt)
         }
-        $btn.Content = $sp
-        $btn.Add_Click({
-            param($s, $e)
-            $lb = [string]$s.Tag
-            if ($st.multi) {
-                if ($st.sel -contains $lb) {
-                    $null = $st.sel.Remove($lb)
-                    $t1.Text = $lb
+        $oi = 0
+        foreach ($o in @($q.opts)) {
+            $oi++
+            $lbl = [string]$o.label; $desc = [string]$o.desc; $prev = [string]$o.preview
+            $row = [System.Windows.Controls.StackPanel]::new(); $row.Orientation = 'Horizontal'
+            $btn = [System.Windows.Controls.Button]::new()
+            [System.Windows.Automation.AutomationProperties]::SetAutomationId($btn, $(if ($single) { "AskOpt$oi" } else { "AskQ${qi}Opt$oi" }))
+            $btn.Tag = $lbl
+            $btn.HorizontalContentAlignment = 'Left'
+            $btn.Padding = '10,6'; $btn.Margin = '0,2'
+            $sp = [System.Windows.Controls.StackPanel]::new()
+            $t1 = [System.Windows.Controls.TextBlock]::new(); $t1.Text = $lbl; $t1.FontWeight = 'SemiBold'; $t1.FontSize = 12
+            $null = $sp.Children.Add($t1)
+            if ($desc) {
+                $t2 = [System.Windows.Controls.TextBlock]::new(); $t2.Text = $desc
+                $t2.Foreground = $T.status; $t2.FontSize = 11; $t2.TextWrapping = 'Wrap'
+                $null = $sp.Children.Add($t2)
+            }
+            $btn.Content = $sp
+            $btn.Add_Click({
+                param($s, $e)
+                $lb = [string]$s.Tag
+                if ($immediate) {
+                    Send-AskAnswer ('ESCOLHA: ' + $lb)
                 } else {
-                    $null = $st.sel.Add($lb)
-                    $t1.Text = [string][char]0x2714 + ' ' + $lb
+                    if ($qst.sel -contains $lb) {
+                        $null = $qst.sel.Remove($lb)
+                        $t1.Text = $lb
+                    } else {
+                        $null = $qst.sel.Add($lb)
+                        $t1.Text = [string][char]0x2714 + ' ' + $lb
+                    }
+                    $AskOkBtn.IsEnabled = $true
                 }
-                $AskOkBtn.IsEnabled = ($st.sel.Count -gt 0)
+            }.GetNewClosure())
+            $row.Children.Add($btn) | Out-Null
+            if ($prev) {
+                # preview mono (codigo/mockup/config) — botao 👁 expande/colapsa
+                $pvBtn = [System.Windows.Controls.Button]::new()
+                $pvBtn.Content = '👁'; $pvBtn.Padding = '4,2'; $pvBtn.Margin = '4,0,0,2'; $pvBtn.FontSize = 11
+                $pvTb = [System.Windows.Controls.TextBlock]::new()
+                $pvTb.Text = $prev
+                $pvTb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
+                $pvTb.FontSize = 11; $pvTb.TextWrapping = 'Wrap'; $pvTb.Foreground = $T.code
+                $pvBox = [System.Windows.Controls.Border]::new()
+                $pvBox.Background = $T.input; $pvBox.BorderBrush = $T.border; $pvBox.BorderThickness = '1'
+                $pvBox.CornerRadius = '4'; $pvBox.Padding = '6,4'; $pvBox.Margin = '0,2,0,4'
+                $pvBox.MaxHeight = 150; $pvBox.Visibility = 'Collapsed'
+                $pvBox.Child = $pvTb
+                $pvBtn.Add_Click({
+                    param($s2, $e2)
+                    $pvBox.Visibility = $(if ($pvBox.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' })
+                    $e2.Handled = $true
+                }.GetNewClosure())
+                $row.Children.Add($pvBtn) | Out-Null
+                $qsp.Children.Add($row) | Out-Null
+                $qsp.Children.Add($pvBox) | Out-Null
             } else {
-                Send-AskAnswer ('ESCOLHA: ' + $lb)
+                $qsp.Children.Add($row) | Out-Null
+            }
+        }
+        # texto livre desta pergunta (aparece com o ✎)
+        $fb = [System.Windows.Controls.TextBox]::new()
+        $fb.Height = 28; $fb.Margin = '0,4,0,0'; $fb.FontSize = 12
+        $fb.Background = $T.input; $fb.Foreground = $T.fg; $fb.BorderBrush = $T.border
+        $fb.CaretBrush = $T.fg; $fb.Padding = '6,4'; $fb.Visibility = 'Collapsed'
+        [System.Windows.Automation.AutomationProperties]::SetAutomationId($fb, "AskQ${qi}Free")
+        $qst.freeBox = $fb
+        $fb.Add_KeyDown({
+            param($s3, $e3)
+            if ($e3.Key -eq 'Enter' -and $s3.Text.Trim()) {
+                $e3.Handled = $true
+                if ($single) { Send-AskAnswer ('TEXTO: ' + $s3.Text.Trim()) }
+                else { $AskOkBtn.IsEnabled = $true }
             }
         }.GetNewClosure())
-        $null = $AskPanel.Children.Add($btn)
+        $qsp.Children.Add($fb) | Out-Null
+        $AskPanel.Children.Add($qsp) | Out-Null
     }
-    $AskOkBtn.Visibility = $(if ($st.multi) { 'Visible' } else { 'Collapsed' })
-    $AskOkBtn.IsEnabled = $false
+    $AskOkBtn.Visibility = $(if ($needOk) { 'Visible' } else { 'Collapsed' })
+    $AskOkBtn.IsEnabled = $true
     $AskFreeRow.Visibility = 'Collapsed'; $AskInput.Text = ''
     $AskBar.Visibility = 'Visible'
     # pergunta exige o usuario: janela oculta precisa aparecer
     if (-not $window.IsVisible) { Center-Window; $window.Show() }
     [void]$window.Activate()
-    if (@($AskPanel.Children).Count -gt 0) { [void]@($AskPanel.Children)[0].Focus() }
-    # ecoa a pergunta na conversa (fica no card junto da resposta dada)
+    try { [void]@($AskPanel.Children)[0].Focus() } catch {}
+    # ecoa as perguntas na conversa (fica no card junto da resposta dada)
     $card = New-Card ('❓ ' + $hdr)
-    Add-MdLines $card.Blocks ([string]$c.question) $true
-    foreach ($o in @($c.options)) {
-        $p = [System.Windows.Documents.Paragraph]::new(); $p.Margin = '0,1'
-        $b = [System.Windows.Documents.Run]::new('• '); $b.Foreground = $T.dim
-        $null = $p.Inlines.Add($b)
-        $l = [System.Windows.Documents.Run]::new([string]$o.label); $l.FontWeight = 'SemiBold'
-        $null = $p.Inlines.Add($l)
-        if ([string]$o.desc) {
-            $d = [System.Windows.Documents.Run]::new(' — ' + [string]$o.desc); $d.Foreground = $T.status
-            $null = $p.Inlines.Add($d)
+    foreach ($q in $qsArr) {
+        Add-MdLines $card.Blocks ([string]$q.q) $true
+        foreach ($o in @($q.opts)) {
+            $p = [System.Windows.Documents.Paragraph]::new(); $p.Margin = '0,1'
+            $b = [System.Windows.Documents.Run]::new('• '); $b.Foreground = $T.dim
+            $null = $p.Inlines.Add($b)
+            $l = [System.Windows.Documents.Run]::new([string]$o.label); $l.FontWeight = 'SemiBold'
+            $null = $p.Inlines.Add($l)
+            if ([string]$o.desc) {
+                $d = [System.Windows.Documents.Run]::new(' — ' + [string]$o.desc); $d.Foreground = $T.status
+                $null = $p.Inlines.Add($d)
+            }
+            $null = $card.Blocks.Add($p)
         }
-        $null = $card.Blocks.Add($p)
     }
     $AnswerDoc.Blocks.Add($card.Section) | Out-Null
     Scroll-AnswerToEnd
     $script:askCard = $card.Section
-    Log ('ask: ' + $c.question + $(if ($st.multi) { ' [multi]' } else { '' }))
+    Log ('ask: ' + $(if ($single) { [string]$qsArr[0].q } else { $qs.Count.ToString() + ' perguntas' }) + $(if ($needOk) { ' [confirma]' } else { '' }))
 }
 
-$AskOkBtn.Add_Click({ if ($script:askState) { Send-AskAnswer ('ESCOLHA: ' + ($script:askState.sel -join ' | ')) } })
-$AskOtherBtn.Add_Click({ $AskFreeRow.Visibility = 'Visible'; [void]$AskInput.Focus() })
-$AskCancelBtn.Add_Click({ Log 'ask: cancelada (botão)'; Send-AskAnswer $null })
-$AskSendBtn.Add_Click({ if ($AskInput.Text.Trim()) { Send-AskAnswer ('TEXTO: ' + $AskInput.Text.Trim()) } })
-$AskInput.Add_KeyDown({
-    param($s, $e)
-    if ($e.Key -eq 'Enter' -and $AskInput.Text.Trim()) { $e.Handled = $true; Send-AskAnswer ('TEXTO: ' + $AskInput.Text.Trim()) }
+$AskOkBtn.Add_Click({
+    if (-not $script:askState) { return }
+    # coleta por pergunta: texto livre > seleção > vazio ("")
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($q in @($script:askState.qs)) {
+        $ft = ''
+        if ($q.freeBox) { $ft = ([string]$q.freeBox.Text).Trim() }
+        if ($ft) { $parts.Add('TEXTO: ' + $ft) }
+        elseif (@($q.sel).Count -gt 0) { $parts.Add('ESCOLHA: ' + (@($q.sel) -join ' | ')) }
+        else { $parts.Add('') }
+    }
+    if ($parts.Count -eq 1) { Send-AskAnswer ([string]$parts[0]) }
+    else { Send-AskAnswer ('[' + (($parts | ForEach-Object { ConvertTo-Json -InputObject $_ }) -join ',') + ']') }
 })
+$AskOtherBtn.Add_Click({
+    if (-not $script:askState) { return }
+    foreach ($q in @($script:askState.qs)) { if ($q.freeBox) { $q.freeBox.Visibility = 'Visible' } }
+    $f = @($script:askState.qs | Where-Object { $_.freeBox })[0]
+    if ($f) { [void]$f.freeBox.Focus() }
+})
+$AskCancelBtn.Add_Click({ Log 'ask: cancelada (botão)'; Send-AskAnswer $null })
 
 function Update-ModelBox {
     $p = Get-ActiveProfile
@@ -2409,6 +3009,40 @@ $InputBox.Add_PreviewKeyDown({
     }
 })
 
+# ---------- @menção a arquivos (#11): '@' no comeco de palavra abre dialogo ----------
+function Open-MentionDialog {
+    # retorna $true quando um arquivo foi escolhido (quem chamou engole o '@');
+    # cancelado retorna $false e o '@' cai no campo como texto comum
+    $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+    $dlg.Title = 'Mencionar arquivo (@)'
+    $dlg.InitialDirectory = [Environment]::GetFolderPath('UserProfile')
+    $dlg.Filter = 'Todos os arquivos|*.*'
+    try { $dlg.Owner = $window } catch {}   # WPF .NET Core (pwsh7) nao tem Owner setavel — sem dono, segue modal na thread (13/10)
+    if ($dlg.ShowDialog()) {
+        $p = $dlg.FileName
+        $ins = if ($p -match '\s') { '"' + $p + '"' } else { $p }
+        $pos2 = [Math]::Max(0, $InputBox.CaretIndex)
+        $InputBox.Text = $InputBox.Text.Insert($pos2, $ins)
+        $InputBox.CaretIndex = $pos2 + $ins.Length
+        [void]$InputBox.Focus()
+        Log ('menção: ' + $p)
+        return $true
+    }
+    return $false
+}
+
+$InputBox.Add_PreviewTextInput({
+    param($s, $e)
+    if ($e.Text -ne '@') { return }
+    # so' no comeco de palavra: inicio do campo, ou depois de espaco/[/( —
+    # email, redes (@user) e texto no meio nao abrem o dialogo
+    $pos = [Math]::Max(0, $InputBox.CaretIndex)
+    $before = ''
+    if ($pos -gt 0 -and $pos -le $InputBox.Text.Length) { $before = $InputBox.Text.Substring($pos - 1, 1) }
+    if ($before -ne '' -and $before -notmatch '[\s\[(]') { return }
+    if (Open-MentionDialog) { $e.Handled = $true }   # o '@' em si nao entra
+})
+
 $window.AllowDrop = $true
 $window.Add_PreviewDragOver({ param($s, $e) $e.Effects = [System.Windows.DragDropEffects]::Copy; $e.Handled = $true })
 $window.Add_Drop({
@@ -2429,7 +3063,8 @@ $window.Add_Drop({
 # e esconde a janela. Alt+Q continua sendo so' mostrar/ocultar.
 # Excecao: com pergunta aberta, Esc so' cancela a pergunta (o modelo segue).
 $window.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') {
-    if ($AskBar.Visibility -eq 'Visible') { Log 'esc: pergunta cancelada'; Send-AskAnswer $null }
+    if ($PlanBar.Visibility -eq 'Visible') { Log 'esc: plano rejeitado'; if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $false) }; Hide-PlanBar; $StatusText.Text = 'plano rejeitado' }
+    elseif ($AskBar.Visibility -eq 'Visible') { Log 'esc: pergunta cancelada'; Send-AskAnswer $null }
     else { Log 'esc: conversa fechada'; New-Conversation; $window.Hide() }
     $e.Handled = $true
 } })
