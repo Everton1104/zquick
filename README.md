@@ -50,6 +50,14 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   UMA vez — executa tudo sem confirmações individuais
 - **ask_user**: até 4 perguntas de uma vez, múltipla escolha ou texto
   livre, com preview mono lado a lado (código/mockup/config)
+- **Tools de leitura em paralelo**: `web_search`, `fetch_page`,
+  `file_list`, `file_read`, `file_grep` pedidas no mesmo round disparam
+  juntas; os tool_results voltam na **ordem original** (ids casados) e
+  escritas seguem seriais
+- **MCP**: cliente mínimo stdio — servidores em `mcpServers` do
+  `zquick.json`; tools externas ganham prefixo `mcp_<srv>_<tool>` e
+  schema saneado (sem `pattern`); até 6 servidores × 40 tools, sobem no
+  primeiro envio, processos encerrados ao sair/trocar perfil
 - Botão **⏹ Parar** (parcial preservada), **fila de mensagens** durante
   a resposta, retry com backoff 1/3/8s (429/5xx/rede), watchdog de
   stream (120s sem dados corta o turno)
@@ -87,6 +95,7 @@ ou direto no `zquick.json` do perfil.
 | `hotkey` / `maxTokens` / `hideOnBlur` | `alt+q` / 4096 / false | atalho, teto da resposta, fechar ao perder foco |
 | `windowOpacity` / `theme` | 1.0 / — | opacidade e paleta (15 chaves hex) |
 | `allow` | — | `runPs` (comandos exatos) e `paths` (pastas) do "✔ Sempre" |
+| `mcpServers` | — | `{ nome: { command, args[] } }` — servidores MCP stdio (tools viram `mcp_*`) |
 | `profiles.{nome}` | — | `label, baseUrl, apiKey, fastModel, bigModel, visionModel, models[]` |
 
 ## Build do exe
@@ -109,13 +118,20 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   ondas — Parar/grep (`test-stop`, `test-grep`), memória/fila
   (`test-memory`, `test-queue`), ask/plan (`test-ask`, `test-panel`,
   `test-planreal`), shell persistente (`test-shell`), @menção
-  (`test-atdialog`), busca server/cache (`test-zaiserver`, `test-zai-cache`)
+  (`test-atdialog`), busca server/cache (`test-zaiserver`, `test-zai-cache`),
+  paralelo+MCP (`test-parallel-engine`, `test-mcp-engine` +
+  fixture `test-mcp-server.ps1`, `test-par4-ui`)
 
 ## Arquitetura em 1 parágrafo
 
 UI WPF na thread STA; engine C# (`HttpClient`/SSE) em thread própria
 comunicando-se por `ConcurrentQueue` drenada por `DispatcherTimer` de
-80ms. Loop agêntico até 12 rodadas; busca server-side chega como blocos
+80ms. Loop agêntico até 12 rodadas; `ExecTools` dispara as tools de
+leitura em paralelo (fase A lança, fase B recolhe na ordem original —
+escritas/gates seriais). Servidores MCP vivem como processos filhos
+stdio (JSON-RPC linha a linha, id casado na resposta; `initialize` →
+`tools/list` → `tools/call`, resultados truncados em 8 KB). Busca
+server-side chega como blocos
 `server_tool_use`/`tool_result` no stream (replay cru no histórico;
 blocos de texto sintetizados pelo servidor são filtrados). `run_ps`
 fala com um filho pwsh/powershell vivo por pipes (comando em base64
@@ -127,13 +143,15 @@ Conversas salvas por completo (inclusive imagens em base64) em
 ## Paridade com o Claude Code
 
 Análise de 16 lacunas em `~/zquick-vs-claude.html` (13/10/2026).
-As **Ondas 1–3** (commits `634966f`, `9e62c41`, `c62e720`) fecharam 14
-delas — edição com diff, grep, retry, Parar, memória, sempre-permitir,
-fila, shell persistente, @menção, ask_user multi+preview, modo plano,
-cache de prompt, verificação pós-escrita, medidor de contexto. Restam
-abertas só o paralelismo de tools e o ecossistema MCP. E o ZQuick faz
-coisas que o Claude Code não faz: residente Alt+Q + bandeja, anexos por
-Ctrl+V, histórico retomável com imagens.
+As **Ondas 1–4** (commits `634966f`, `9e62c41`, `c62e720`, `7bd4b0e`)
+fecharam as 16 — edição com diff, grep, retry, Parar, memória,
+sempre-permitir, fila, shell persistente, @menção, ask_user
+multi+preview, modo plano, cache de prompt, verificação pós-escrita,
+medidor de contexto, **tools de leitura em paralelo** e **cliente
+MCP**. O que resta (skills/plugins dedicados, subagents) é ecossistema,
+não capacidade. E o ZQuick faz coisas que o Claude Code não faz:
+residente Alt+Q + bandeja, anexos por Ctrl+V, histórico retomável com
+imagens.
 
 ## Versões
 
@@ -145,6 +163,7 @@ Ctrl+V, histórico retomável com imagens.
 | `634966f` | Onda 1 — Parar, retry/backoff, file_grep, ctx meter, rounds 12 |
 | `9e62c41` | Onda 2 — file_edit com diff, memória, "Sempre permitir", fila, watchdog SSE |
 | `c62e720` | Onda 3 — busca server-side Z.ai, prompt cache, shell persistente, @menção, ask_user multi+preview, modo plano |
+| `7bd4b0e` | Onda 4 — tools de leitura em paralelo (ordem preservada), cliente MCP stdio (`mcpServers`) |
 
 ## Notas de engenharia (lições)
 
@@ -164,5 +183,9 @@ Ctrl+V, histórico retomável com imagens.
   ValuePattern ou hooks `/uitest`.
 - `SendInput` x64: a union do INPUT precisa do MOUSEINPUT para
   `SizeOf(INPUT)` = 40 — sem ele injeta nada e retorna 0.
+- E2E: `%TEMP%\zquick.log` é escrito com `Add-Content` e fica **travado
+  por instantes** — toda leitura em teste precisa de retry (10×150ms);
+  e o log **não tem data** (só HH:mm:ss), então filtro por hora
+  casa sujeira de dias anteriores — usar offset de bytes como marca.
 
 Log de diagnóstico: `%TEMP%\zquick.log`.
