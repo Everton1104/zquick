@@ -42,5 +42,6 @@
   "allow": {
     "paths": [],
     "runPs": []
-  }
+  },
+  "mcpServers": null
 }

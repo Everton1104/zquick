@@ -44,6 +44,7 @@ $cfg = @{
     windowOpacity = 1.0
     theme         = $null
     allow         = @{ runPs = @(); paths = @() }   # "sempre permitir": comandos exatos + pastas liberadas
+    mcpServers    = $null      # Onda 4: { "nome": { "command": "...", "args": [...], "env": {...} } } — servidores MCP stdio
     profiles      = @{
         zai = @{
             label    = 'Z.ai GLM'
@@ -59,7 +60,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','mcpServers')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.theme) { $cfg.theme = $j.theme }
@@ -103,7 +104,7 @@ function Save-Config {
             profile = $cfg.profile; model = $cfg.model; hotkey = $cfg.hotkey; maxTokens = $cfg.maxTokens
             searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity
-            theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow
+            theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
         [pscustomobject]$out | ConvertTo-Json -Depth 6 | Set-Content -Path $cfgPath -Encoding utf8
     } catch { Log "save-config: $_" }
@@ -660,7 +661,7 @@ public class Engine {
     // cancelamento (botao Parar / Esc / nova conversa): o que ja chegou fica no card
     void StopCancelled() { Emit("stopped", ""); Emit("done", ""); }
 
-    class Blk {
+    public class Blk {   // public: testes headless constroem blocos p/ ExecTools/McpCall
         public string Kind; public StringBuilder Text = new StringBuilder(); public string Id; public string Name; public StringBuilder Input = new StringBuilder();
         public bool Live;      // texto ja esta' sendo mostrado no card (delta emitido)
         public bool Trace;     // texto = banner da busca server Z.ai (descarta no card E no historico)
@@ -704,6 +705,7 @@ public class Engine {
         List<string[]> pdfFiles = a.Length > 4 ? (List<string[]>)a[4] : null;
         var ct = _cts.Token;
         try {
+            McpInit();   // Onda 4: sobe servidores MCP ANTES do 1o BuildBody (tools entram na lista)
             lock (_sync) {
                 _useBig = false;
                 _planOk = false;   // aprovacao de plano vale so' ate' o fim do turno
@@ -836,53 +838,8 @@ public class Engine {
                 foreach (Blk b in blocks) { string j2 = BlkJson(b); if (j2 != null) bj.Add(j2); }
                 lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"); }
                 if (stop != "tool_use" || ct.IsCancellationRequested) { Emit("done", ""); return; }
-                // executa tools
-                var resJson = new StringBuilder();
-                var sources = new List<string>();
-                foreach (Blk b in blocks) {
-                    if (b.Kind != "tool_use") continue;
-                    if (ct.IsCancellationRequested) break;
-                    string outp = ""; string q = null; string u = null;
-                    Dictionary<string, object> inp = MJ.Parse(b.Input.Length > 0 ? b.Input.ToString() : "{}") as Dictionary<string, object>;
-                    if (inp != null) { q = H.S(inp, "query"); u = H.S(inp, "url"); }
-                    if (b.Name == "file_list" || b.Name == "file_read" || b.Name == "file_grep" || b.Name == "file_edit" || b.Name == "file_write" || b.Name == "file_move" ||
-                        b.Name == "file_delete" || b.Name == "note_add" || b.Name == "memory_save" || b.Name == "run_ps") {
-                        Emit("status", "⚙ " + b.Name + "…");
-                        outp = LocalTool(b.Name, inp, ct);
-                    }
-                    else if (b.Name == "web_search") { Emit("status", "\U0001F50D " + (q ?? "?")); outp = DoSearch(q, ct, sources); }
-                    else if (b.Name == "fetch_page") { Emit("status", "\U0001F4C4 " + (u ?? "?")); outp = DoFetch(u, ct); }
-                    else if (b.Name == "ask_user") { Emit("status", "❓ esperando sua escolha…"); outp = DoAskUser(inp, ct); }
-                    else if (b.Name == "plan") {
-                        string title = H.S(inp, "title");
-                        var steps = new List<string>();
-                        object sv;
-                        if (inp != null && inp.TryGetValue("steps", out sv) && sv is List<object>)
-                            foreach (object x in (List<object>)sv) {
-                                string s2 = x as string; if (string.IsNullOrEmpty(s2) || s2.Trim().Length == 0) continue;
-                                steps.Add(s2.Trim()); if (steps.Count >= 8) break;
-                            }
-                        if (string.IsNullOrEmpty(title) || steps.Count == 0) outp = "ERRO: envie 'title' (resumo curto) e 'steps' (array de 1-8 passos curtos, verbo + objeto).";
-                        else {
-                            Emit("status", "\U0001F9ED plano proposto — aguardando sua decisão…");
-                            if (GatePlan(title, steps, ct)) {
-                                _planOk = true;
-                                outp = "APROVADO pelo usuário. Execute os passos AGORA, em ordem, SEM pedir confirmação individual (o lote já foi aprovado; a janela aprova sozinha). Ao final, entregue um resumo curto do que fez.";
-                            } else {
-                                outp = "REJEITADO pelo usuário. NÃO execute as ações planejadas. Ajuste o plano (ou pergunte com ask_user o que ele prefere) e proponha de novo; só ações de leitura (file_list/file_read/file_grep/web_search) seguem liberadas.";
-                            }
-                        }
-                    }
-                    else if (b.Name == "escalate") {
-                        _useBig = true;
-                        Emit("status", "↗ encaminhando ao " + _big + "…");
-                        outp = "OK — escalated. The larger model will now answer the user directly.";
-                    }
-                    else outp = "unknown tool";
-                    if (resJson.Length > 0) resJson.Append(",");
-                    resJson.Append("{\"type\":\"tool_result\",\"tool_use_id\":").Append(J(b.Id)).Append(",\"content\":").Append(J(outp)).Append("}");
-                }
-                if (sources.Count > 0) Emit("sources", "[" + string.Join(",", sources) + "]");
+                // executa tools — Onda 4: leitura/busca EM PARALELO, o resto serial na ordem
+                string resJson = ExecTools(blocks, ct);
                 lock (_sync) { _history.Add("{\"role\":\"user\",\"content\":[" + resJson + "]}"); }
             }
             Emit("done", "");
@@ -890,6 +847,263 @@ public class Engine {
             if (ct.IsCancellationRequested) StopCancelled();
             else Emit("error", ex.Message);
         } finally { lock (_sync) { _busy = 0; } }
+    }
+
+    // ---------- execucao das tools do round (Onda 4 #5: leitura em paralelo) ----------
+    // Somente-leitura (web_search/fetch_page/file_list/file_read/file_grep) roda
+    // EM PARALELO (Task por bloco); o resto (mutantes com confirm, run_ps, ask_user,
+    // plan, escalate, mcp_*) roda serial na thread do turno. Os tool_results voltam
+    // SEMPRE na ordem original dos blocos — os ids tem que casar com os tool_use.
+    public static bool Parallelizable(string name) {
+        return name == "web_search" || name == "fetch_page" || name == "file_list"
+            || name == "file_read" || name == "file_grep";
+    }
+
+    public string ExecTools(List<Blk> blocks, CancellationToken ct) {
+        string[] outs = new string[blocks.Count];
+        Task[] tasks = new Task[blocks.Count];
+        int nPar = 0;
+        for (int i = 0; i < blocks.Count; i++) {
+            Blk b = blocks[i];
+            if (b.Kind != "tool_use" || !Parallelizable(b.Name)) continue;
+            Dictionary<string, object> inp = MJ.Parse(b.Input.Length > 0 ? b.Input.ToString() : "{}") as Dictionary<string, object>;
+            string nm = b.Name;
+            string query = inp != null ? H.S(inp, "query") : null;
+            string url = inp != null ? H.S(inp, "url") : null;
+            int idx = i;
+            tasks[i] = Task.Factory.StartNew(delegate {
+                try {
+                    string o;
+                    List<string> src = null;
+                    if (nm == "web_search") { src = new List<string>(); Emit("status", "\U0001F50D " + (query ?? "?")); o = DoSearch(query, ct, src); }
+                    else if (nm == "fetch_page") { Emit("status", "\U0001F4C4 " + (url ?? "?")); o = DoFetch(url, ct); }
+                    else { Emit("status", "⚙ " + nm + "…"); o = LocalTool(nm, inp, ct); }
+                    if (src != null && src.Count > 0) Emit("sources", "[" + string.Join(",", src.ToArray()) + "]");
+                    outs[idx] = o;
+                } catch (Exception ex) { outs[idx] = "ERRO: " + ex.Message; }
+            });
+            nPar++;
+        }
+        if (nPar >= 2) Emit("status", "⚙ " + nPar + " tools em paralelo…");
+        var resJson = new StringBuilder();
+        for (int i = 0; i < blocks.Count; i++) {
+            Blk b = blocks[i];
+            if (b.Kind != "tool_use") continue;
+            if (ct.IsCancellationRequested) break;
+            string outp;
+            if (tasks[i] != null) { tasks[i].Wait(); outp = outs[i] ?? ""; }
+            else {
+                Dictionary<string, object> inp = MJ.Parse(b.Input.Length > 0 ? b.Input.ToString() : "{}") as Dictionary<string, object>;
+                if (b.Name == "ask_user") { Emit("status", "❓ esperando sua escolha…"); outp = DoAskUser(inp, ct); }
+                else if (b.Name == "plan") {
+                    string title = H.S(inp, "title");
+                    var steps = new List<string>();
+                    object sv;
+                    if (inp != null && inp.TryGetValue("steps", out sv) && sv is List<object>)
+                        foreach (object x in (List<object>)sv) {
+                            string s2 = x as string; if (string.IsNullOrEmpty(s2) || s2.Trim().Length == 0) continue;
+                            steps.Add(s2.Trim()); if (steps.Count >= 8) break;
+                        }
+                    if (string.IsNullOrEmpty(title) || steps.Count == 0) outp = "ERRO: envie 'title' (resumo curto) e 'steps' (array de 1-8 passos curtos, verbo + objeto).";
+                    else {
+                        Emit("status", "\U0001F9ED plano proposto — aguardando sua decisão…");
+                        if (GatePlan(title, steps, ct)) {
+                            _planOk = true;
+                            outp = "APROVADO pelo usuário. Execute os passos AGORA, em ordem, SEM pedir confirmação individual (o lote já foi aprovado; a janela aprova sozinha). Ao final, entregue um resumo curto do que fez.";
+                        } else {
+                            outp = "REJEITADO pelo usuário. NÃO execute as ações planejadas. Ajuste o plano (ou pergunte com ask_user o que ele prefere) e proponha de novo; só ações de leitura (file_list/file_read/file_grep/web_search) seguem liberadas.";
+                        }
+                    }
+                }
+                else if (b.Name == "escalate") {
+                    _useBig = true;
+                    Emit("status", "↗ encaminhando ao " + _big + "…");
+                    outp = "OK — escalated. The larger model will now answer the user directly.";
+                }
+                else if (b.Name.Length > 4 && b.Name.StartsWith("mcp_")) {
+                    Emit("status", "⚙ " + b.Name + "…");
+                    outp = McpCall(b.Name, b.Input.Length > 0 ? b.Input.ToString() : "{}");
+                }
+                else { Emit("status", "⚙ " + b.Name + "…"); outp = LocalTool(b.Name, inp, ct); }
+            }
+            if (resJson.Length > 0) resJson.Append(",");
+            resJson.Append("{\"type\":\"tool_result\",\"tool_use_id\":").Append(J(b.Id)).Append(",\"content\":").Append(J(outp)).Append("}");
+        }
+        return resJson.ToString();
+    }
+
+    // ---------- cliente MCP minimo (Onda 4): servidores stdio JSON-RPC ----------
+    // Config no zquick.json: "mcpServers": { "nome": { "command": "...", "args": [...], "env": {...} } }.
+    // Cada tool do servidor vira mcp_<nome>_<tool> na lista do modelo (schema saneado:
+    // sem "pattern" — Z.ai rejeita, erro 1210). Protocolo: JSON-RPC 2.0 por linha no
+    // stdio — initialize -> notifications/initialized -> tools/list -> tools/call.
+    public class McpSrv {
+        public string Name;
+        System.Diagnostics.Process _p; StreamWriter _in;
+        readonly System.Collections.Concurrent.ConcurrentQueue<string> _q = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        int _id; readonly object _idLock = new object();
+        public List<string[]> Tools = new List<string[]>();   // {nome-prefixado, tool-anthropic-json, nome-real}
+
+        public string Start(string command, string argsStr, string envJson) {
+            try {
+                System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(command, argsStr ?? "");
+                psi.UseShellExecute = false; psi.CreateNoWindow = true;
+                psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+                psi.StandardOutputEncoding = Encoding.UTF8; psi.StandardErrorEncoding = Encoding.UTF8;
+                psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                if (!string.IsNullOrEmpty(envJson)) {
+                    Dictionary<string, object> ev = MJ.Parse(envJson) as Dictionary<string, object>;
+                    if (ev != null) foreach (KeyValuePair<string, object> kv2 in ev) psi.EnvironmentVariables[kv2.Key] = kv2.Value == null ? "" : kv2.Value.ToString();
+                }
+                _p = System.Diagnostics.Process.Start(psi);
+                _in = _p.StandardInput; _in.AutoFlush = true;
+                Thread rd = new Thread(Pump); rd.IsBackground = true; rd.Start(_p.StandardOutput);
+                Thread re = new Thread(PumpErr); re.IsBackground = true; re.Start(_p.StandardError);
+                string init = Rpc("initialize", "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{}," +
+                    "\"clientInfo\":{\"name\":\"zquick\",\"version\":\"3.5\"}}", 20);
+                if (init == null) { Kill(); return "initialize sem resposta (20s)"; }
+                Notify("notifications/initialized");
+                return null;
+            } catch (Exception ex) { Kill(); return ex.Message; }
+        }
+        void Pump(object o) { StreamReader sr = (StreamReader)o; try { while (true) { string l = sr.ReadLine(); if (l == null) break; if (l.Trim().Length > 0) _q.Enqueue(l); } } catch { } }
+        void PumpErr(object o) { try { StreamReader sr = (StreamReader)o; while (sr.ReadLine() != null) { } } catch { } }
+        void Send(string json) { try { _in.WriteLine(json); } catch { } }
+        void Notify(string method) { Send("{\"jsonrpc\":\"2.0\",\"method\":" + J(method) + "}"); }
+
+        // request/response com casamento por id; notificacoes do servidor sao descartadas
+        public string Rpc(string method, string paramsJson, int timeoutSec) {
+            int id; lock (_idLock) { id = ++_id; }
+            Send("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":" + J(method) + ",\"params\":" + (string.IsNullOrEmpty(paramsJson) ? "{}" : paramsJson) + "}");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string d;
+            while (sw.Elapsed.TotalSeconds < timeoutSec) {
+                while (_q.TryDequeue(out d)) {
+                    Dictionary<string, object> m = MJ.Parse(d) as Dictionary<string, object>;
+                    if (m == null) continue;
+                    object iv;
+                    if (!m.TryGetValue("id", out iv)) continue;
+                    if (iv is double && (int)(double)iv == id) return d;
+                }
+                if (_p == null || _p.HasExited) return null;
+                Thread.Sleep(25);
+            }
+            return null;
+        }
+
+        public string ListTools() {   // null = ok; popula Tools com JSON anthropic pronto
+            string r = Rpc("tools/list", "{}", 20);
+            if (r == null) return "tools/list sem resposta";
+            Dictionary<string, object> root = MJ.Parse(r) as Dictionary<string, object>;
+            Dictionary<string, object> res = root != null ? H.O(root, "result") : null;
+            object tv;
+            List<object> tools = res != null && res.TryGetValue("tools", out tv) ? tv as List<object> : null;
+            if (tools == null) return "resposta de tools/list inesperada";
+            int n = 0;
+            foreach (object x in tools) {
+                Dictionary<string, object> t = x as Dictionary<string, object>;
+                if (t == null) continue;
+                string nm = H.S(t, "name"); if (string.IsNullOrEmpty(nm)) continue;
+                string desc = H.S(t, "description"); if (desc == null) desc = "MCP tool";
+                object sv;
+                Dictionary<string, object> schema = t.TryGetValue("inputSchema", out sv) ? sv as Dictionary<string, object> : null;
+                if (schema == null) schema = new Dictionary<string, object>();
+                string pref = "mcp_" + Name + "_" + nm;
+                string tj = "{\"name\":" + J(pref)
+                    + ",\"description\":" + J("[MCP " + Name + "] " + desc)
+                    + ",\"input_schema\":" + ToJson(StripPattern(schema)) + "}";
+                Tools.Add(new string[] { pref, tj, nm });
+                if (++n >= 40) break;
+            }
+            return n == 0 ? "nenhuma tool no servidor" : null;
+        }
+
+        public string Call(string realName, string argsJson, int timeoutSec) {
+            string r = Rpc("tools/call", "{\"name\":" + J(realName) + ",\"arguments\":" + (string.IsNullOrEmpty(argsJson) ? "{}" : argsJson) + "}", timeoutSec);
+            if (r == null) return "ERRO MCP: sem resposta em " + timeoutSec + "s";
+            Dictionary<string, object> root = MJ.Parse(r) as Dictionary<string, object>;
+            Dictionary<string, object> err = root != null ? H.O(root, "error") : null;
+            if (err != null) return "ERRO MCP: " + Trunc(ToJson(err), 300);
+            Dictionary<string, object> res = root != null ? H.O(root, "result") : null;
+            object cv;
+            List<object> content = res != null && res.TryGetValue("content", out cv) ? cv as List<object> : null;
+            var sb = new StringBuilder();
+            if (content != null) foreach (object x in content) {
+                Dictionary<string, object> c = x as Dictionary<string, object>;
+                if (c == null) continue;
+                if (H.S(c, "type") == "text") { string tx = H.S(c, "text"); if (tx != null) { sb.Append(tx); sb.Append('\n'); } }
+            }
+            string o2 = sb.ToString().Trim();
+            if (res != null && res.ContainsKey("isError") && res["isError"] is bool && (bool)res["isError"]) o2 = "ERRO MCP: " + o2;
+            if (o2.Length == 0) o2 = "(sem texto no resultado)";
+            return Trunc(o2, 8000);
+        }
+
+        public void Kill() {
+            try { if (_in != null) _in.Close(); } catch { }
+            try { if (_p != null) { if (!_p.HasExited) _p.Kill(); _p.Dispose(); } } catch { }
+            _p = null; _in = null;
+            string d; while (_q.TryDequeue(out d)) { }
+        }
+    }
+
+    string _mcpCfg;                                          // json cru de cfg.mcpServers
+    readonly List<McpSrv> _mcp = new List<McpSrv>();
+    volatile bool _mcpTried;
+
+    public void SetMcpConfig(string json) { _mcpCfg = json; }
+
+    public int McpInit() {   // idempotente: sobe servidores + tools/list; retorna total de tools MCP
+        if (_mcpTried) return McpToolCount();
+        _mcpTried = true;
+        if (!string.IsNullOrEmpty(_mcpCfg)) {
+            Dictionary<string, object> cfg = MJ.Parse(_mcpCfg) as Dictionary<string, object>;
+            if (cfg != null) foreach (KeyValuePair<string, object> kv in cfg) {
+                if (_mcp.Count >= 6) break;
+                Dictionary<string, object> sc = kv.Value as Dictionary<string, object>;
+                if (sc == null) continue;
+                string cmd = H.S(sc, "command");
+                if (string.IsNullOrEmpty(cmd)) { Emit("note", "mcp " + kv.Key + ": sem 'command' no config"); continue; }
+                object av;
+                List<object> argList = sc.TryGetValue("args", out av) ? av as List<object> : null;
+                var argsB = new StringBuilder(); int ai = 0;
+                if (argList != null) foreach (object a2 in argList) { if (ai++ > 0) argsB.Append(' '); argsB.Append('"').Append(Convert.ToString(a2).Replace("\"", "\\\"")).Append('"'); }
+                McpSrv srv = new McpSrv(); srv.Name = kv.Key;
+                string err = srv.Start(cmd, argsB.ToString(), sc.ContainsKey("env") ? ToJson(sc["env"]) : null);
+                if (err == null) err = srv.ListTools();
+                if (err != null) { Emit("note", "mcp " + kv.Key + " indisponível: " + err); srv.Kill(); }
+                else { _mcp.Add(srv); Emit("note", "mcp " + kv.Key + ": " + srv.Tools.Count + " tool(s) prontas"); }
+            }
+        }
+        return McpToolCount();
+    }
+
+    public int McpToolCount() { int c = 0; foreach (McpSrv s in _mcp) c += s.Tools.Count; return c; }
+
+    public string McpToolSchema(string prefixedName) {
+        foreach (McpSrv s in _mcp) foreach (string[] t in s.Tools) if (t[0] == prefixedName) return t[1];
+        return null;
+    }
+
+    public string McpCall(string prefixedName, string argsJson) {
+        foreach (McpSrv s in _mcp) foreach (string[] t in s.Tools)
+            if (t[0] == prefixedName) return s.Call(t[2], argsJson, 90);
+        return "ERRO MCP: tool desconhecida: " + prefixedName;
+    }
+
+    public void ShutdownMcp() { foreach (McpSrv s in _mcp) s.Kill(); _mcp.Clear(); }
+
+    // remove "pattern" recursivo do schema (Z.ai rejeita com erro 1210)
+    static object StripPattern(object o) {
+        Dictionary<string, object> d = o as Dictionary<string, object>;
+        if (d != null) {
+            Dictionary<string, object> nd = new Dictionary<string, object>();
+            foreach (KeyValuePair<string, object> kv in d) if (kv.Key != "pattern") nd[kv.Key] = StripPattern(kv.Value);
+            return nd;
+        }
+        List<object> l = o as List<object>;
+        if (l != null) { List<object> nl = new List<object>(); foreach (object x in l) nl.Add(StripPattern(x)); return nl; }
+        return o;
     }
 
     string BuildBody(string sys) {
@@ -923,6 +1137,9 @@ public class Engine {
         tools.Add("{\"name\":\"plan\",\"description\":\"Propose a multi-step plan of ACTIONS (create/edit/move/delete files, run commands) and wait for the user's approval ONCE. Approved: every listed action runs in this turn WITHOUT individual confirmations. Rejected: nothing runs. Use when the task needs 3+ steps that alter files or the system. Do NOT use it for read-only exploration or single actions.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\",\"description\":\"short plan title in Portuguese\"},\"steps\":{\"type\":\"array\",\"description\":\"ordered steps, each short (verb + object)\",\"items\":{\"type\":\"string\"}}},\"required\":[\"title\",\"steps\"]}}");
         if (_auto && !_useBig && !_useVision) // vision-routed nao oferece escalate: o big nao enxerga
             tools.Add("{\"name\":\"escalate\",\"description\":\"Hand the question over to the larger, smarter model. Call this when the user's question needs deep reasoning, careful multi-step analysis, long code, or when you feel your answer would be noticeably better from a stronger model. Do NOT call it for quick factual questions, simple lookups, translations or chit-chat.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"short reason in Portuguese\"}}}}");
+        // tools MCP (Onda 4): entram ANTES do cache_control (que cai na ultima =
+        // cobre o prefixo inteiro); a lista e' estavel dentro da conversa
+        if (_mcp.Count > 0) foreach (McpSrv s in _mcp) foreach (string[] t in s.Tools) tools.Add(t[1]);
         if (_cacheCtl) {
             // cache_control na ULTIMA tool: o cache cobre o prefixo inteiro (system+tools)
             int last = tools.Count - 1;
@@ -1634,6 +1851,10 @@ function New-EngineFromProfile {
         [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue, [bool]$cfg.promptCache)
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
     $eng.MemPath = $memFile
+    if ($cfg.mcpServers) {
+        # Onda 4: servidores MCP sobem no 1o turno (McpInit) — aqui so' entrega o config
+        try { $eng.SetMcpConfig(($cfg.mcpServers | ConvertTo-Json -Depth 6 -Compress)) } catch { Log "mcp-config: $_" }
+    }
     $rules = @{ runPs = @(); paths = @() }
     if ($cfg.allow) { $rules = $cfg.allow }
     $eng.SetAllowRules([string[]]$rules.runPs, [string[]]$rules.paths)
@@ -1686,6 +1907,7 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "O usuário pode responder texto livre ou cancelar; se cancelar/não responder, decida sozinho a opção mais conservadora e informe — não repita a pergunta. " +
      "Antes de executar 3+ ações que ALTERAM arquivos ou o sistema (criar/editar/mover/apagar, comandos), PROponha com plan {title, steps[]}: o usuário aprova UMA vez e as ações rodam sem confirmação individual; se rejeitar, nada executa — replique o plano ajustado ou pergunte. " +
      "Ao mexer com arquivos, confirme os caminhos com file_list antes. " +
+     "Tools com prefixo mcp_ vêm de servidores externos (MCP) configurados pelo usuário — use-as como usaria as built-in quando fizer sentido. " +
      "Formatação leve: negrito e listas simples quando ajudar, nada de títulos grandes.")
 }
 
@@ -2976,7 +3198,7 @@ $ProfileBox.Add_SelectionChanged({
     $n = [string]$pNames[$i]
     if ($n -eq [string]$cfg.profile -and $null -ne $script:engine) { return }
     $cfg.profile = $n; Save-Config
-    if ($null -ne $script:engine) { $script:engine.Reset() }
+    if ($null -ne $script:engine) { $script:engine.Reset(); try { $script:engine.ShutdownMcp() } catch {} }
     try {
         $script:engine = New-EngineFromProfile
         New-Conversation
@@ -3102,6 +3324,7 @@ $miShow.Add_Click({ Toggle-Window })
 $miExit = [System.Windows.Forms.ToolStripMenuItem]::new('Sair')
 $miExit.Add_Click({
     $script:exiting = $true
+    try { if ($script:engine) { $script:engine.ShutdownMcp() } } catch {}   # mata servidores MCP filhos
     try { $notify.Visible = $false; $notify.Dispose() } catch {}
     [System.Windows.Application]::Current.Shutdown()
 })
