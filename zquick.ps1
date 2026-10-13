@@ -1040,6 +1040,7 @@ if ($cfg.windowOpacity -and [double]$cfg.windowOpacity -gt 0 -and [double]$cfg.w
 
 # ---------- estado ----------
 $script:busy = $false
+$script:exiting = $false
 $script:curAnswer = ''
 $script:lastAnswer = ''
 $script:pendSources = @()
@@ -1655,14 +1656,16 @@ function Reset-Conversation {
 }
 
 function Toggle-Window {
-    Log 'toggle'
-    if ($window.IsVisible) { $window.Hide() }
-    else {
-        Center-Window
-        $window.Show(); [void]$window.Activate()
-        [void]$InputBox.Focus()
-        Reset-Conversation
-    }
+    try {
+        Log 'toggle'
+        if ($window.IsVisible) { $window.Hide() }
+        else {
+            Center-Window
+            $window.Show(); [void]$window.Activate()
+            [void]$InputBox.Focus()
+            Reset-Conversation
+        }
+    } catch { Log "toggle erro: $_" }   # nunca deixar vazar p/ dispatcher (dialogo JIT)
 }
 
 # ---------- hotkey global ----------
@@ -1823,6 +1826,17 @@ $window.Add_Drop({
 $window.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') { Log 'esc: conversa fechada'; New-Conversation; $window.Hide(); $e.Handled = $true } })
 if ($cfg.hideOnBlur) { $window.Add_Deactivated({ $window.Hide() }) }
 
+# X nativo / Alt+F4: janela WPF fechada nao pode ser reexibida (Show() lancaria
+# InvalidOperationException no proximo clique no tray). App de bandeja so' esconde;
+# sair de verdade e' pelo menu do tray, que marca $script:exiting antes do Shutdown.
+$window.Add_Closing({ param($s, $e)
+    if (-not $script:exiting) {
+        Log 'X/Alt+F4: ocultando (tray) em vez de fechar'
+        $e.Cancel = $true
+        $s.Hide()
+    }
+})
+
 # ---------- tray icon ----------
 $bmp = [System.Drawing.Bitmap]::new(16, 16)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -1843,6 +1857,7 @@ $miShow = [System.Windows.Forms.ToolStripMenuItem]::new('Mostrar')
 $miShow.Add_Click({ Toggle-Window })
 $miExit = [System.Windows.Forms.ToolStripMenuItem]::new('Sair')
 $miExit.Add_Click({
+    $script:exiting = $true
     try { $notify.Visible = $false; $notify.Dispose() } catch {}
     [System.Windows.Application]::Current.Shutdown()
 })
