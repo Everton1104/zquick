@@ -19,6 +19,6 @@ function Check-Xaml([string]$xaml, [string[]]$names, [string]$rotulo) {
     "$rotulo : OK ($($names.Count) elementos)"
 }
 
-Check-Xaml $main @('ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') 'janela principal'
+Check-Xaml $main @('ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') 'janela principal'
 Check-Xaml $hist @('Search','List','CountText','DelBtn','OkBtn') 'dialogo historico'
 'tudo OK'

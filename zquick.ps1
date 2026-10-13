@@ -19,7 +19,7 @@ if (-not $createdNew) { Log 'ja existe outra instancia — saindo'; exit 0 }
 
 try {
 # ---------- assemblies ----------
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, UIAutomationTypes
 
 # ---------- config (schema v2: perfis multi-provider) ----------
 # No exe (PS2EXE) $PSScriptRoot é vazio -> deriva da pasta do proprio exe.
@@ -270,6 +270,7 @@ public class Engine {
     string _pdfFallback;  // msg do usuario SEM os PDFs (retry se o endpoint rejeitar document blocks)
     public string PsExe;  // powershell p/ tool run_ps (default powershell.exe)
     int _confirmId; readonly ManualResetEventSlim _confEv = new ManualResetEventSlim(false); bool _confOk;
+    int _askId; readonly ManualResetEventSlim _askEv = new ManualResetEventSlim(false); string _askAnswer;
     bool _compactAsked;   // pergunta de compactacao da conversa: 1x por conversa
     readonly int _maxTokens; readonly string _search;
     readonly List<string> _history = new List<string>();
@@ -352,6 +353,64 @@ public class Engine {
         bool ok = _confEv.IsSet && _confOk && !ct.IsCancellationRequested;
         Emit("confirm", "{\"hide\":true}");
         return ok;
+    }
+
+    // ---------- pergunta de multipla escolha ao usuario (decisao, estilo AskUserQuestion do Claude Code) ----------
+    public void AnswerAsk(int id, string answer) {
+        lock (_sync) { if (id != _askId) return; _askAnswer = answer; _askEv.Set(); }
+    }
+
+    string GateAsk(string question, string header, bool multi, List<string[]> options, CancellationToken ct) {
+        int id;
+        lock (_sync) { _askId++; id = _askId; _askAnswer = null; _askEv.Reset(); }
+        var sb = new StringBuilder();
+        sb.Append("{\"id\":").Append(id)
+          .Append(",\"question\":").Append(J(question))
+          .Append(",\"header\":").Append(J(string.IsNullOrEmpty(header) ? "decisão" : header))
+          .Append(",\"multi\":").Append(multi ? "true" : "false")
+          .Append(",\"options\":[");
+        for (int i = 0; i < options.Count; i++) {
+            if (i > 0) sb.Append(",");
+            sb.Append("{\"label\":").Append(J(options[i][0])).Append(",\"desc\":").Append(J(options[i][1])).Append("}");
+        }
+        sb.Append("]}");
+        Emit("ask", sb.ToString());
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true) {
+            if (ct.IsCancellationRequested) break;
+            if (_askEv.Wait(300)) break;
+            if (sw.Elapsed.TotalMinutes > 10) { Emit("status", "pergunta sem resposta (10 min) — seguindo sem"); break; }
+        }
+        string ans = null;
+        lock (_sync) { if (_askEv.IsSet) ans = _askAnswer; }
+        Emit("ask", "{\"hide\":true}");
+        return ans;
+    }
+
+    string DoAskUser(Dictionary<string, object> inp, CancellationToken ct) {
+        string question = H.S(inp, "question");
+        string header = H.S(inp, "header");
+        bool multi = false; object mv;
+        if (inp != null && inp.TryGetValue("multiSelect", out mv)) multi = mv is bool && (bool)mv;
+        var opts = new List<string[]>();
+        object ov;
+        if (inp != null && inp.TryGetValue("options", out ov) && ov is List<object>) {
+            foreach (object it in (List<object>)ov) {
+                var od = it as Dictionary<string, object>;
+                if (od == null) continue;
+                string lb = H.S(od, "label"); if (string.IsNullOrEmpty(lb)) continue;
+                string de = H.S(od, "description"); if (de == null) de = "";
+                opts.Add(new string[] { lb, de });
+                if (opts.Count >= 4) break;
+            }
+        }
+        if (string.IsNullOrEmpty(question)) return "ERRO: preencha 'question' (a pergunta completa, terminando em ?).";
+        if (opts.Count < 2) return "ERRO: ofereça de 2 a 4 opções em 'options' (cada uma {label, description}).";
+        string ans = GateAsk(question, header, multi, opts, ct);
+        if (ans == null) return "O usuário cancelou ou não respondeu à pergunta. NÃO pergunte de novo: tome a decisão mais conservadora (ou nenhuma) e informe o que decidiu.";
+        if (ans.StartsWith("TEXTO:")) return "O usuário respondeu com texto livre: \"" + ans.Substring(6).Trim() + "\"";
+        if (ans.StartsWith("ESCOLHA:")) return "O usuário escolheu: " + ans.Substring(8).Trim().Replace(" | ", " e ") + ".";
+        return "O usuário respondeu: " + ans;
     }
 
     // ---------- compactacao da conversa (resumo das trocas antigas) ----------
@@ -529,6 +588,7 @@ public class Engine {
                     }
                     else if (b.Name == "web_search") { Emit("status", "\U0001F50D " + (q ?? "?")); outp = DoSearch(q, ct, sources); }
                     else if (b.Name == "fetch_page") { Emit("status", "\U0001F4C4 " + (u ?? "?")); outp = DoFetch(u, ct); }
+                    else if (b.Name == "ask_user") { Emit("status", "❓ esperando sua escolha…"); outp = DoAskUser(inp, ct); }
                     else if (b.Name == "escalate") {
                         _useBig = true;
                         Emit("status", "↗ encaminhando ao " + _big + "…");
@@ -562,7 +622,8 @@ public class Engine {
          .Append(",{\"name\":\"file_move\",\"description\":\"Move or RENAME a file or folder. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\",\"description\":\"absolute source path\"},\"dest\":{\"type\":\"string\",\"description\":\"absolute destination path (full new name)\"}},\"required\":[\"src\",\"dest\"]}}")
          .Append(",{\"name\":\"file_delete\",\"description\":\"Send a file or folder to the Recycle Bin. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute path\"}},\"required\":[\"path\"]}}")
          .Append(",{\"name\":\"note_add\",\"description\":\"Save a markdown note to the user's notes folder (Documents/ZQuick-Notas). Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\",\"description\":\"markdown body\"}},\"required\":[\"title\",\"content\"]}}")
-         .Append(",{\"name\":\"run_ps\",\"description\":\"Run ANY PowerShell command on the user's Windows (open apps, system settings, processes, checks...). ALWAYS shown to the user for approval before running. Do NOT delete user files with this (use file_delete). Keep commands short and idempotent.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"PowerShell command line\"}},\"required\":[\"command\"]}}");
+         .Append(",{\"name\":\"run_ps\",\"description\":\"Run ANY PowerShell command on the user's Windows (open apps, system settings, processes, checks...). ALWAYS shown to the user for approval before running. Do NOT delete user files with this (use file_delete). Keep commands short and idempotent.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"PowerShell command line\"}},\"required\":[\"command\"]}}")
+         .Append(",{\"name\":\"ask_user\",\"description\":\"Ask the user ONE multiple-choice question and wait for their pick. Use when the task has ambiguity or a decision the user should make (which approach, which file, scope, taste, a risky trade-off). Do NOT use it for anything you can decide yourself or verify with file_list/web_search, and never ask the same question twice. 2-4 options, each with a short label (1-5 words) and a description of what it implies; the user can always answer free text instead.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"the complete question in Portuguese, specific, ending with ?\"},\"header\":{\"type\":\"string\",\"description\":\"short chip label, max ~12 chars\"},\"multiSelect\":{\"type\":\"boolean\",\"description\":\"true = the user may pick several options\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"description\":\"concise option, 1-5 words\"},\"description\":{\"type\":\"string\",\"description\":\"what choosing this implies\"}},\"required\":[\"label\"]}}},\"required\":[\"question\",\"options\"]}}");
         if (_auto && !_useBig && !_useVision) // vision-routed nao oferece escalate: o big nao enxerga
             b.Append(",{\"name\":\"escalate\",\"description\":\"Hand the question over to the larger, smarter model. Call this when the user's question needs deep reasoning, careful multi-step analysis, long code, or when you feel your answer would be noticeably better from a stronger model. Do NOT call it for quick factual questions, simple lookups, translations or chit-chat.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"short reason in Portuguese\"}}}}");
         b.Append("],\"messages\":[");
@@ -956,6 +1017,9 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "file_write/file_move/file_delete (alteram algo — o usuário autoriza cada uma na janela; apagar vai para a Lixeira), " +
      "note_add (grava nota em Documentos\\ZQuick-Notas, sem confirmação) e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; " +
      "NUNCA apague arquivos do usuário com run_ps, use file_delete). Se o usuário negar, informe e não repita a mesma ação. " +
+     "Quando a tarefa tiver ambiguidade ou decisão que cabe ao usuário (qual abordagem, qual arquivo, escopo, preferência), pergunte UMA vez com ask_user: " +
+     "2-4 opções de label curto + descrição do que a escolha implica; o usuário pode responder texto livre ou cancelar. " +
+     "Se ele cancelar/não responder, decida sozinho a opção mais conservadora e informe — não repita a pergunta. " +
      "Ao mexer com arquivos, confirme os caminhos com file_list antes. " +
      "Formatação leve: negrito e listas simples quando ajudar, nada de títulos grandes.")
 }
@@ -1007,6 +1071,24 @@ $xamlStr = @'
             </StackPanel>
           </StackPanel>
         </Border>
+        <Border x:Name="AskBar" Visibility="Collapsed" Background="#3A3A44" CornerRadius="6" Margin="14,6,14,0" Padding="10,8">
+          <StackPanel>
+            <TextBlock x:Name="AskHeader" Foreground="#9A9AA5" FontSize="10" FontWeight="SemiBold" Text="DECISÃO"/>
+            <TextBlock x:Name="AskTitle" Foreground="#E8E8EC" FontWeight="SemiBold" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,6"/>
+            <StackPanel x:Name="AskPanel"/>
+            <StackPanel x:Name="AskFreeRow" Orientation="Horizontal" Margin="0,6,0,0" Visibility="Collapsed">
+              <TextBox x:Name="AskInput" MinWidth="240" Height="30" VerticalContentAlignment="Center"
+                       Background="#16161A" Foreground="#E8E8EC" BorderBrush="#3A3A44" BorderThickness="1"
+                       CaretBrush="#E8E8EC" Padding="6,4" FontSize="12"/>
+              <Button x:Name="AskSendBtn" Content="Enviar" Margin="6,0,0,0"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+              <Button x:Name="AskOkBtn" Content="✔ Confirmar escolhas" FontWeight="SemiBold" Visibility="Collapsed"/>
+              <Button x:Name="AskOtherBtn" Content="✎ Outra resposta…" Margin="8,0,0,0"/>
+              <Button x:Name="AskCancelBtn" Content="✕ Cancelar" Margin="8,0,0,0"/>
+            </StackPanel>
+          </StackPanel>
+        </Border>
         <DockPanel Margin="14,8,14,6">
           <Button x:Name="SendBtn" DockPanel.Dock="Right" Content="Enviar" Padding="14,8" Margin="8,0,0,0" FontSize="13" FontWeight="SemiBold"/>
           <TextBox x:Name="InputBox" Height="68" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
@@ -1029,7 +1111,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -1366,6 +1448,7 @@ function New-Conversation {
     $AnswerDoc.Blocks.Clear()
     $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
     $ConfirmBar.Visibility = 'Collapsed'
+    if ($AskBar.Visibility -eq 'Visible') { $script:askCard = $null; Hide-AskBar }
     Set-Busy $false
     $StatusText.Text = 'nova conversa'
     Add-Placeholder
@@ -1609,7 +1692,7 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; Update-LiveAnswer }
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|📄|↗|⚙') { Log ('tool: ' + $m.Text) } }
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|📄|↗|⚙|❓') { Log ('tool: ' + $m.Text) } }
             'sources' { Show-Sources $m.Text }
             'confirm' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null }
@@ -1621,6 +1704,11 @@ $timer.Add_Tick({
                     $ConfirmBar.Visibility = 'Visible'
                     Log ('confirma: ' + $c.title)
                 }
+            }
+            'ask' {
+                try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null }
+                if ($c -and $c.hide) { Hide-AskBar }
+                elseif ($c) { Show-AskBar $c }
             }
             'done'    { Finish-Turn }
             'error'   { Log ("engine: " + $m.Text); $script:curAnswer += [Environment]::NewLine + "⚠ " + $m.Text; Update-LiveAnswer; Finish-Turn }
@@ -1651,6 +1739,7 @@ function Reset-Conversation {
     $script:convFile = $null; $script:convResumed = $false
     $AnswerDoc.Blocks.Clear()
     $ConfirmBar.Visibility = 'Collapsed'
+    if ($AskBar.Visibility -eq 'Visible') { $script:askCard = $null; Hide-AskBar }
     Add-Placeholder
     Log 'janela reaberta: conversa nova'
 }
@@ -1729,6 +1818,121 @@ $ConfirmYes.Add_Click({
 $ConfirmNo.Add_Click({
     if ($script:engine) { $script:engine.Confirm([int]$script:confirmId, $false) }
     $ConfirmBar.Visibility = 'Collapsed'; $StatusText.Text = 'ação negada'
+})
+
+# ---------- ask_user: painel de decisao multipla-escolha (estilo Claude Code) ----------
+$script:askId = 0; $script:askState = $null; $script:askCard = $null
+
+function Hide-AskBar {
+    $AskBar.Visibility = 'Collapsed'
+    $AskPanel.Children.Clear()
+    $script:askState = $null
+}
+
+function Send-AskAnswer([string]$answer) {
+    # $null/$vazio = cancelado (o engine trata como "nao respondeu")
+    if ($script:engine) { $script:engine.AnswerAsk([int]$script:askId, $answer) }
+    if ($script:askCard) {
+        try {
+            $p = [System.Windows.Documents.Paragraph]::new(); $p.Margin = '0,4,0,0'
+            $what = if ([string]::IsNullOrEmpty($answer)) { '✕ cancelada' }
+                    elseif ($answer.StartsWith('TEXTO:')) { '✎ ' + $answer.Substring(6).Trim() }
+                    else { '✅ ' + ($answer -replace '^ESCOLHA:\s*', '' -replace ' \| ', ' + ') }
+            $r = [System.Windows.Documents.Run]::new('Você: ' + $what)
+            $r.Foreground = $T.q; $r.FontWeight = 'SemiBold'
+            $null = $p.Inlines.Add($r)
+            $script:askCard.Blocks.Add($p) | Out-Null
+            Log ('ask resposta: ' + $what)
+        } catch { Log "ask-eco: $_" }
+    }
+    $script:askCard = $null
+    Hide-AskBar
+    $StatusText.Text = '…'
+}
+
+function Show-AskBar($c) {
+    $script:askId = [int]$c.id
+    # estado do painel: hashtable unica — closures de botao capturam POR VALOR
+    # (referencia compartilhada); $script: dentro de GetNewClosure resolve no
+    # escopo do modulo da closure, NAO no do script — nao usar la.
+    $st = @{ multi = [bool]$c.multi; sel = [System.Collections.ArrayList]::new() }
+    $script:askState = $st
+    $hdr = [string]$c.header; if (-not $hdr) { $hdr = 'decisão' }
+    $AskHeader.Text = $hdr.ToUpperInvariant()
+    $AskTitle.Text = [string]$c.question
+    $AskPanel.Children.Clear()
+    $i = 0
+    foreach ($o in @($c.options)) {
+        $i++
+        $lbl = [string]$o.label; $desc = [string]$o.desc
+        $btn = [System.Windows.Controls.Button]::new()
+        [System.Windows.Automation.AutomationProperties]::SetAutomationId($btn, "AskOpt$i")
+        $btn.Tag = $lbl
+        $btn.HorizontalContentAlignment = 'Left'
+        $btn.Padding = '10,6'; $btn.Margin = '0,2'
+        $sp = [System.Windows.Controls.StackPanel]::new()
+        $t1 = [System.Windows.Controls.TextBlock]::new(); $t1.Text = $lbl; $t1.FontWeight = 'SemiBold'; $t1.FontSize = 12
+        $null = $sp.Children.Add($t1)
+        if ($desc) {
+            $t2 = [System.Windows.Controls.TextBlock]::new(); $t2.Text = $desc
+            $t2.Foreground = $T.status; $t2.FontSize = 11; $t2.TextWrapping = 'Wrap'
+            $null = $sp.Children.Add($t2)
+        }
+        $btn.Content = $sp
+        $btn.Add_Click({
+            param($s, $e)
+            $lb = [string]$s.Tag
+            if ($st.multi) {
+                if ($st.sel -contains $lb) {
+                    $null = $st.sel.Remove($lb)
+                    $t1.Text = $lb
+                } else {
+                    $null = $st.sel.Add($lb)
+                    $t1.Text = [string][char]0x2714 + ' ' + $lb
+                }
+                $AskOkBtn.IsEnabled = ($st.sel.Count -gt 0)
+            } else {
+                Send-AskAnswer ('ESCOLHA: ' + $lb)
+            }
+        }.GetNewClosure())
+        $null = $AskPanel.Children.Add($btn)
+    }
+    $AskOkBtn.Visibility = $(if ($st.multi) { 'Visible' } else { 'Collapsed' })
+    $AskOkBtn.IsEnabled = $false
+    $AskFreeRow.Visibility = 'Collapsed'; $AskInput.Text = ''
+    $AskBar.Visibility = 'Visible'
+    # pergunta exige o usuario: janela oculta precisa aparecer
+    if (-not $window.IsVisible) { Center-Window; $window.Show() }
+    [void]$window.Activate()
+    if (@($AskPanel.Children).Count -gt 0) { [void]@($AskPanel.Children)[0].Focus() }
+    # ecoa a pergunta na conversa (fica no card junto da resposta dada)
+    $card = New-Card ('❓ ' + $hdr)
+    Add-MdLines $card.Blocks ([string]$c.question) $true
+    foreach ($o in @($c.options)) {
+        $p = [System.Windows.Documents.Paragraph]::new(); $p.Margin = '0,1'
+        $b = [System.Windows.Documents.Run]::new('• '); $b.Foreground = $T.dim
+        $null = $p.Inlines.Add($b)
+        $l = [System.Windows.Documents.Run]::new([string]$o.label); $l.FontWeight = 'SemiBold'
+        $null = $p.Inlines.Add($l)
+        if ([string]$o.desc) {
+            $d = [System.Windows.Documents.Run]::new(' — ' + [string]$o.desc); $d.Foreground = $T.status
+            $null = $p.Inlines.Add($d)
+        }
+        $null = $card.Blocks.Add($p)
+    }
+    $AnswerDoc.Blocks.Add($card.Section) | Out-Null
+    Scroll-AnswerToEnd
+    $script:askCard = $card.Section
+    Log ('ask: ' + $c.question + $(if ($st.multi) { ' [multi]' } else { '' }))
+}
+
+$AskOkBtn.Add_Click({ if ($script:askState) { Send-AskAnswer ('ESCOLHA: ' + ($script:askState.sel -join ' | ')) } })
+$AskOtherBtn.Add_Click({ $AskFreeRow.Visibility = 'Visible'; [void]$AskInput.Focus() })
+$AskCancelBtn.Add_Click({ Log 'ask: cancelada (botão)'; Send-AskAnswer $null })
+$AskSendBtn.Add_Click({ if ($AskInput.Text.Trim()) { Send-AskAnswer ('TEXTO: ' + $AskInput.Text.Trim()) } })
+$AskInput.Add_KeyDown({
+    param($s, $e)
+    if ($e.Key -eq 'Enter' -and $AskInput.Text.Trim()) { $e.Handled = $true; Send-AskAnswer ('TEXTO: ' + $AskInput.Text.Trim()) }
 })
 
 function Update-ModelBox {
@@ -1823,7 +2027,12 @@ $window.Add_Drop({
 
 # Esc = FECHAR a conversa: zera como o botao Nova (engine + cartoes + anexos; rascunho fica)
 # e esconde a janela. Alt+Q continua sendo so' mostrar/ocultar.
-$window.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') { Log 'esc: conversa fechada'; New-Conversation; $window.Hide(); $e.Handled = $true } })
+# Excecao: com pergunta aberta, Esc so' cancela a pergunta (o modelo segue).
+$window.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') {
+    if ($AskBar.Visibility -eq 'Visible') { Log 'esc: pergunta cancelada'; Send-AskAnswer $null }
+    else { Log 'esc: conversa fechada'; New-Conversation; $window.Hide() }
+    $e.Handled = $true
+} })
 if ($cfg.hideOnBlur) { $window.Add_Deactivated({ $window.Hide() }) }
 
 # X nativo / Alt+F4: janela WPF fechada nao pode ser reexibida (Show() lancaria
