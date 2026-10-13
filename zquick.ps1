@@ -255,7 +255,7 @@ public static class Hook {
 }
 
 public class UiMsg {
-    public string Type;   // delta | status | sources | done | error | note
+    public string Type;   // delta | status | sources | confirm | ask | stopped | done | error | note
     public string Text;
 }
 
@@ -287,6 +287,23 @@ public class Engine {
     static readonly Regex RxItem = new Regex("<item>.*?<title>(.*?)</title>.*?<link>(.*?)</link>.*?<description>(.*?)</description>", RegexOptions.Singleline | RegexOptions.Compiled);
 
     public bool Busy { get { lock (_sync) { return _busy == 1; } } }
+
+    // ---------- retry: 429/5xx/falha de rede ANTES do 1o token -> backoff exponencial ----------
+    static readonly int[] RetryMs = new int[] { 1000, 3000, 8000 };
+
+    static bool Retryable(Exception ex, CancellationToken ct) {
+        if (ex == null) return false;
+        if (ex is OperationCanceledException) return !ct.IsCancellationRequested;  // timeout do HttpClient, nao cancel do usuario
+        if (ex is HttpRequestException) return true;                               // conexao/DNS/TLS
+        if (ex.Message != null && ex.Message.StartsWith("HTTP ")) {
+            string code = ex.Message.Substring(5).Trim();
+            int sp = code.IndexOf(' ');
+            if (sp > 0) code = code.Substring(0, sp);
+            int c;
+            if (int.TryParse(code, out c)) return c == 429 || (c >= 500 && c <= 504);
+        }
+        return false;
+    }
 
     public Engine(string baseUrl, string apiKey, string model, string fastModel, string bigModel, int maxTokens, string searchEngine, ConcurrentQueue<UiMsg> q) {
         _base = baseUrl.TrimEnd('/'); _key = apiKey; _fast = fastModel; _big = bigModel;
@@ -444,7 +461,22 @@ public class Engine {
         } catch { return null; }
     }
 
+    // ida nao-streaming (compactacao) com o mesmo retry de 429/5xx do turno principal
     string NonStreamOnce(string body, CancellationToken ct) {
+        for (int attempt = 0; ; attempt++) {
+            try { return NonStreamTry(body, ct); }
+            catch (Exception ex) {
+                if (attempt < RetryMs.Length && Retryable(ex, ct)) {
+                    if (ct.WaitHandle.WaitOne(RetryMs[attempt])) break;
+                    continue;
+                }
+                throw;
+            }
+        }
+        return null;
+    }
+
+    string NonStreamTry(string body, CancellationToken ct) {
         var req = new HttpRequestMessage(HttpMethod.Post, _base + "/v1/messages");
         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _key);
         req.Headers.TryAddWithoutValidation("anthropic-version", "2023-06-01");
@@ -463,6 +495,9 @@ public class Engine {
     }
 
     void Emit(string type, string text) { _q.Enqueue(new UiMsg { Type = type, Text = text }); }
+
+    // cancelamento (botao Parar / Esc / nova conversa): o que ja chegou fica no card
+    void StopCancelled() { Emit("stopped", ""); Emit("done", ""); }
 
     class Blk { public string Kind; public StringBuilder Text = new StringBuilder(); public string Id; public string Name; public StringBuilder Input = new StringBuilder(); }
 
@@ -552,22 +587,37 @@ public class Engine {
             }
 
             string stop = "";
-            for (int round = 0; round < 6; round++) {
-                if (ct.IsCancellationRequested) { Emit("error", "Cancelado."); return; }
+            // teto de rodadas por turno: 12 (era 6). Tarefas multi-ferramenta (buscar ->
+            // editar -> testar) morriam no meio; tokens seguem limitados pelos tetos de
+            // compactacao do historico (28 msgs / 150 KB / teto duro 40 msgs / 300 KB).
+            for (int round = 0; round < 12; round++) {
+                if (ct.IsCancellationRequested) { StopCancelled(); return; }
                 string body;
                 lock (_sync) { body = BuildBody(round == 0 ? sys0 : sys); }
-                List<Blk> blocks;
-                try { blocks = StreamOnce(body, ct, out stop); }
-                catch (Exception ex) {
-                    // endpoint rejeitou os document blocks de PDF -> reenvia sem (1x)
-                    if (_pdfFallback != null && ex.Message.StartsWith("HTTP 400")) {
-                        lock (_sync) { if (_history.Count > 0) _history[_history.Count - 1] = _pdfFallback; _pdfFallback = null; }
-                        Emit("note", "PDF rejeitado pelo endpoint — reenviando sem o PDF");
-                        round--; continue;
+                List<Blk> blocks = null;
+                bool pdfRetry = false;
+                for (int attempt = 0; ; attempt++) {
+                    bool streamed = false;
+                    try { blocks = StreamOnce(body, ct, out stop, out streamed); break; }
+                    catch (Exception ex) {
+                        // endpoint rejeitou os document blocks de PDF -> reenvia sem (1x)
+                        if (_pdfFallback != null && ex.Message.StartsWith("HTTP 400")) {
+                            lock (_sync) { if (_history.Count > 0) _history[_history.Count - 1] = _pdfFallback; _pdfFallback = null; }
+                            Emit("note", "PDF rejeitado pelo endpoint — reenviando sem o PDF");
+                            pdfRetry = true; break;
+                        }
+                        // 429/5xx/falha de rede ANTES do 1o delta -> tenta de novo com backoff.
+                        // Depois do 1o delta nao da: repetir a ida duplicaria a resposta no card.
+                        if (!streamed && attempt < RetryMs.Length && Retryable(ex, ct)) {
+                            Emit("status", "servidor ocupado — tentativa " + (attempt + 2) + "/" + (RetryMs.Length + 1) + "…");
+                            if (ct.WaitHandle.WaitOne(RetryMs[attempt])) { StopCancelled(); return; }
+                            continue;
+                        }
+                        throw;
                     }
-                    throw;
                 }
-                if (ct.IsCancellationRequested) { Emit("error", "Cancelado."); return; }
+                if (pdfRetry) { round--; continue; }
+                if (ct.IsCancellationRequested) { StopCancelled(); return; }
                 List<string> bj = new List<string>();
                 foreach (Blk b in blocks) bj.Add(BlkJson(b));
                 lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"); }
@@ -581,7 +631,7 @@ public class Engine {
                     string outp = ""; string q = null; string u = null;
                     Dictionary<string, object> inp = MJ.Parse(b.Input.Length > 0 ? b.Input.ToString() : "{}") as Dictionary<string, object>;
                     if (inp != null) { q = H.S(inp, "query"); u = H.S(inp, "url"); }
-                    if (b.Name == "file_list" || b.Name == "file_read" || b.Name == "file_write" || b.Name == "file_move" ||
+                    if (b.Name == "file_list" || b.Name == "file_read" || b.Name == "file_grep" || b.Name == "file_write" || b.Name == "file_move" ||
                         b.Name == "file_delete" || b.Name == "note_add" || b.Name == "run_ps") {
                         Emit("status", "⚙ " + b.Name + "…");
                         outp = LocalTool(b.Name, inp, ct);
@@ -603,7 +653,8 @@ public class Engine {
             }
             Emit("done", "");
         } catch (Exception ex) {
-            Emit("error", ct.IsCancellationRequested ? "Cancelado." : ex.Message);
+            if (ct.IsCancellationRequested) StopCancelled();
+            else Emit("error", ex.Message);
         } finally { lock (_sync) { _busy = 0; } }
     }
 
@@ -618,7 +669,8 @@ public class Engine {
          .Append("{\"name\":\"fetch_page\",\"description\":\"Fetch one web page by absolute http(s) URL and return its readable text (truncated). Use to read details of a promising search result.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"absolute http or https URL\"}},\"required\":[\"url\"]}}")
          .Append(",{\"name\":\"file_list\",\"description\":\"List files and folders of a directory on the user's Windows.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute directory path (empty = user home)\"}}}}")
          .Append(",{\"name\":\"file_read\",\"description\":\"Read a text file from the user's Windows (first 8000 chars).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"}},\"required\":[\"path\"]}}")
-         .Append(",{\"name\":\"file_write\",\"description\":\"Create or overwrite a text file (any extension). Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}")
+         .Append(",{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (content search, recursive): returns the matching lines as file:line: text. Use it to find where a term/name/config is defined or used — far cheaper than reading files one by one.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"text or regular expression to find in file contents\"},\"path\":{\"type\":\"string\",\"description\":\"absolute folder path to search in (empty = user home)\"},\"glob\":{\"type\":\"string\",\"description\":\"filename filter like *.ps1 or *.txt (empty = all files)\"}},\"required\":[\"pattern\"]}}")
+         .Append(",{\"name\":\"file_write\",\"description\":\"Create or overwrite a text file (any extension). Requires the user's approval in the app window. If the file already exists, the previous version is kept as <file>.zquick.bak.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}")
          .Append(",{\"name\":\"file_move\",\"description\":\"Move or RENAME a file or folder. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\",\"description\":\"absolute source path\"},\"dest\":{\"type\":\"string\",\"description\":\"absolute destination path (full new name)\"}},\"required\":[\"src\",\"dest\"]}}")
          .Append(",{\"name\":\"file_delete\",\"description\":\"Send a file or folder to the Recycle Bin. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute path\"}},\"required\":[\"path\"]}}")
          .Append(",{\"name\":\"note_add\",\"description\":\"Save a markdown note to the user's notes folder (Documents/ZQuick-Notas). Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\",\"description\":\"markdown body\"}},\"required\":[\"title\",\"content\"]}}")
@@ -639,8 +691,8 @@ public class Engine {
         return b.ToString();
     }
 
-    List<Blk> StreamOnce(string body, CancellationToken ct, out string stop) {
-        stop = "end_turn";
+    List<Blk> StreamOnce(string body, CancellationToken ct, out string stop, out bool streamed) {
+        stop = "end_turn"; streamed = false;
         var blocks = new Dictionary<int, Blk>();
         var req = new HttpRequestMessage(HttpMethod.Post, _base + "/v1/messages");
         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _key);
@@ -680,6 +732,7 @@ public class Engine {
                         if (dk == "text_delta") {
                             string tx = H.S(del, "text"); if (tx == null) tx = "";
                             if (ttft < 0) { ttft = swt.Elapsed.TotalSeconds; Emit("note", string.Format("1º token em {0:0.0}s", ttft)); }
+                            streamed = true;
                             blk.Text.Append(tx); Emit("delta", tx);
                         } else if (dk == "input_json_delta") {
                             string pj = H.S(del, "partial_json"); if (pj != null) blk.Input.Append(pj);
@@ -825,6 +878,56 @@ public class Engine {
                 string t = File.ReadAllText(p);
                 return "ARQUIVO " + p + " (" + t.Length + " chars):\n" + (t.Length > 8000 ? t.Substring(0, 8000) + "\n…(truncado)" : t);
             }
+            if (name == "file_grep") {
+                string pattern = H.S(inp, "pattern");
+                string glob = H.S(inp, "glob");
+                string dir = string.IsNullOrEmpty(p) ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : p;
+                if (string.IsNullOrEmpty(pattern)) return "ERRO: informe 'pattern' (texto ou regex).";
+                if (!Directory.Exists(dir)) return "ERRO: pasta não encontrada: " + dir;
+                if (string.IsNullOrEmpty(glob)) glob = "*";
+                Regex rx;
+                try { rx = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled); }
+                catch (Exception) { rx = new Regex(Regex.Escape(pattern), RegexOptions.IgnoreCase | RegexOptions.Compiled); }
+                // binarios/imagens: so' gastariam tempo; caps: 50 resultados / 400 arquivos / 8s
+                string[] skipExt = new string[] { ".exe",".dll",".sys",".png",".jpg",".jpeg",".gif",".bmp",".webp",".ico",".pdf",".zip",".7z",".rar",".msi",".iso",".woff",".woff2",".ttf",".otf",".mp3",".mp4",".avi",".mkv",".mov",".bin",".dat",".pdb" };
+                var sbG = new StringBuilder();
+                var pending = new Stack<string>();
+                pending.Push(dir);   // pilha manual: pasta sem permissao nao derruba a varredura
+                int matches = 0, files = 0;
+                var swG = System.Diagnostics.Stopwatch.StartNew();
+                while (pending.Count > 0 && matches < 50 && files < 400 && swG.Elapsed.TotalSeconds <= 8) {
+                    string d = pending.Pop();
+                    string[] subs = null;
+                    try { subs = Directory.GetDirectories(d); } catch { }
+                    if (subs != null) foreach (string s in subs) {
+                        try { if ((File.GetAttributes(s) & FileAttributes.ReparsePoint) == 0) pending.Push(s); } catch { }   // junction = laco infinito
+                    }
+                    string[] fsArr = null;
+                    try { fsArr = Directory.GetFiles(d, glob); } catch { }
+                    if (fsArr == null) continue;
+                    foreach (string f in fsArr) {
+                        if (matches >= 50 || files >= 400 || swG.Elapsed.TotalSeconds > 8) break;
+                        files++;
+                        if (Array.IndexOf(skipExt, Path.GetExtension(f).ToLowerInvariant()) >= 0) continue;
+                        try {
+                            if (new FileInfo(f).Length > 2000000) continue;
+                            string[] lines = File.ReadAllLines(f);
+                            for (int li = 0; li < lines.Length && matches < 50; li++) {
+                                if (rx.IsMatch(lines[li])) {
+                                    matches++;
+                                    string one = lines[li].Trim();
+                                    if (one.Length > 160) one = one.Substring(0, 160) + "…";
+                                    sbG.Append(f).Append(':').Append(li + 1).Append(": ").Append(one).Append('\n');
+                                }
+                            }
+                        } catch { }
+                    }
+                }
+                if (matches == 0) return "Nenhum resultado de \"" + pattern + "\" em " + dir + " (" + files + " arquivo(s) varridos).";
+                return "GREP \"" + pattern + "\" em " + dir + " — " + matches + " linha(s), " + files + " arquivo(s) varridos"
+                    + (matches >= 50 ? " (limite 50)" : "") + (files >= 400 ? " (limite 400 arquivos)" : "")
+                    + (swG.Elapsed.TotalSeconds > 8 ? " (parou por tempo)" : "") + ":\n" + sbG.ToString();
+            }
             if (name == "file_write") {
                 string path = H.S(inp, "path"); string content = H.S(inp, "content") ?? "";
                 if (string.IsNullOrEmpty(path)) return "ERRO: path obrigatório";
@@ -832,8 +935,10 @@ public class Engine {
                 string full = Path.GetFullPath(path);
                 string d = Path.GetDirectoryName(full);
                 if (!Directory.Exists(d)) Directory.CreateDirectory(d);
+                bool bak = false;
+                try { if (File.Exists(full)) { File.Copy(full, full + ".zquick.bak", true); bak = true; } } catch { }
                 File.WriteAllText(full, content, new UTF8Encoding(false));
-                return "OK — gravado: " + full;
+                return "OK — gravado: " + full + (bak ? " (versão anterior em " + Path.GetFileName(full) + ".zquick.bak)" : "");
             }
             if (name == "file_move") {
                 string src = H.S(inp, "src"), dest = H.S(inp, "dest");
@@ -1014,6 +1119,7 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "Se o usuário anexar imagens (prints), interprete o que foi pedido. " +
      "Arquivo anexado (PDF, DOCX, texto/código) chega DENTRO da mensagem — responda pelo conteúdo anexado, sem procurar no disco. " +
      "Você também pode AGIR no Windows do usuário: file_list/file_read (leitura, sem confirmação), " +
+     "file_grep (busca de CONTEÚDO dentro dos arquivos de uma pasta, recursiva — quando quiser achar onde algo está definido ou usado, prefira file_grep a ler arquivo por arquivo), " +
      "file_write/file_move/file_delete (alteram algo — o usuário autoriza cada uma na janela; apagar vai para a Lixeira), " +
      "note_add (grava nota em Documentos\\ZQuick-Notas, sem confirmação) e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; " +
      "NUNCA apague arquivos do usuário com run_ps, use file_delete). Se o usuário negar, informe e não repita a mesma ação. " +
@@ -1123,6 +1229,7 @@ if ($cfg.windowOpacity -and [double]$cfg.windowOpacity -gt 0 -and [double]$cfg.w
 # ---------- estado ----------
 $script:busy = $false
 $script:exiting = $false
+$script:stopped = $false     # veio 'stopped' do engine: resposta interrompida a pedido
 $script:curAnswer = ''
 $script:lastAnswer = ''
 $script:pendSources = @()
@@ -1134,6 +1241,7 @@ $script:sendTime = [datetime]::MinValue
 $script:convFile = $null
 $script:convResumed = $false
 $script:curQuestion = ''
+$script:modelLabel = ''
 
 # ---------- helpers de UI ----------
 function Open-Url($u) {
@@ -1255,8 +1363,9 @@ function Show-Sources($json) {
 
 function Set-Busy([bool]$b) {
     $script:busy = $b
-    $SendBtn.IsEnabled = -not $b
-    $SendBtn.Content = if ($b) { '…' } else { 'Enviar' }
+    # ocupado: o botao vira "Parar" (clicavel) — Cancel() preserva o que ja chegou no card
+    $SendBtn.Content = if ($b) { '⏹ Parar' } else { 'Enviar' }
+    $SendBtn.ToolTip = if ($b) { 'Interromper a resposta — o que já chegou fica no card' } else { $null }
 }
 
 function Finish-Turn {
@@ -1270,7 +1379,30 @@ function Finish-Turn {
     if ($prev.Length -gt 100) { $prev = $prev.Substring(0, 100) + '…' }
     Log ("respondido: {0} chars em {1}s | {2}" -f $script:lastAnswer.Length, $el, $prev)
     Update-LiveAnswer
+    if ($script:stopped) {
+        # resposta interrompida pelo Parar: marca no fim do card (Update-LiveAnswer
+        # ja refez o painel — so' agora e' seguro acrescentar)
+        $script:stopped = $false
+        if ($script:livePanel) {
+            $sp = [System.Windows.Documents.Paragraph]::new(); $sp.Margin = '0,4,0,0'
+            $sr = [System.Windows.Documents.Run]::new('⏹ interrompido')
+            $sr.Foreground = $T.dim
+            $null = $sp.Inlines.Add($sr)
+            $script:livePanel.Add($sp) | Out-Null
+        }
+    }
     Save-History
+    Update-CtxMeter
+}
+
+# rodape: modelo + consumo estimado do contexto (100% = limiar de compactacao, 150k chars)
+function Update-CtxMeter {
+    try {
+        $chars = 0
+        if ($script:engine) { foreach ($h in @($script:engine.GetHistory())) { $chars += ([string]$h).Length } }
+        $pct = [int](100 * $chars / 150000); if ($pct -gt 100) { $pct = 100 }
+        $ModelText.Text = if ($script:modelLabel) { "{0} • ctx {1}%" -f $script:modelLabel, $pct } else { "ctx ${pct}%" }
+    } catch { Log "ctx: $_" }
 }
 
 # ---------- anexos ----------
@@ -1406,7 +1538,7 @@ function Send-Current {
         elseif ($at.Kind -eq 'pdf') { $pdfs.Add(@([string]$at.Name, [string]$at.B64)) }
     }
     if (-not $text -and $imgs.Count -eq 0 -and $txtFiles.Count -eq 0 -and $pdfs.Count -eq 0) { return }
-    if ($script:busy) { $StatusText.Text = 'aguarde a resposta atual…'; return }
+    if ($script:busy) { $StatusText.Text = 'respondendo — ⏹ Parar interrompe'; return }
 
     $q = New-Card $null
     $qtxt = "❯ $text"
@@ -1449,7 +1581,9 @@ function New-Conversation {
     $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
     $ConfirmBar.Visibility = 'Collapsed'
     if ($AskBar.Visibility -eq 'Visible') { $script:askCard = $null; Hide-AskBar }
+    $script:stopped = $false
     Set-Busy $false
+    Update-CtxMeter
     $StatusText.Text = 'nova conversa'
     Add-Placeholder
     [void]$InputBox.Focus()
@@ -1555,6 +1689,7 @@ function Load-Conversation([string]$file) {
         # conversa retomada CONTINUA no mesmo arquivo (proximo envio atualiza ele)
         $script:convFile = $file
         $script:convResumed = $true
+        Update-CtxMeter
         $StatusText.Text = 'conversa retomada'
         Log ("historico: retomou {0} msgs de {1}" -f $msgs.Count, (Split-Path $file -Leaf))
         [void]$InputBox.Focus()
@@ -1710,6 +1845,7 @@ $timer.Add_Tick({
                 if ($c -and $c.hide) { Hide-AskBar }
                 elseif ($c) { Show-AskBar $c }
             }
+            'stopped' { $script:stopped = $true }
             'done'    { Finish-Turn }
             'error'   { Log ("engine: " + $m.Text); $script:curAnswer += [Environment]::NewLine + "⚠ " + $m.Text; Update-LiveAnswer; Finish-Turn }
             'note'    { $StatusText.Text = $m.Text; Log ("note: " + $m.Text) }
@@ -1735,6 +1871,7 @@ function Reset-Conversation {
     # Se um stream estiver rolando, mantem — so nao zera no meio da resposta.
     if ($script:busy) { return }
     if ($script:engine) { $script:engine.Reset() }
+    $script:stopped = $false
     $script:curAnswer = ''; $script:lastAnswer = ''; $script:pendSources = @(); $script:livePanel = $null
     $script:convFile = $null; $script:convResumed = $false
     $AnswerDoc.Blocks.Clear()
@@ -1806,7 +1943,13 @@ $window.Add_SourceInitialized({
 })
 
 # ---------- eventos UI ----------
-$SendBtn.Add_Click({ Send-Current })
+$SendBtn.Add_Click({
+    if ($script:busy) {
+        if ($script:engine) { $script:engine.Cancel() }
+        $StatusText.Text = 'interrompendo…'
+        Log 'parar: cancel solicitado'
+    } else { Send-Current }
+})
 $CloseBtn.Add_Click({ $window.Hide() })
 $NewBtn.Add_Click({ New-Conversation })
 $HistBtn.Add_Click({ Show-History })
@@ -1945,14 +2088,16 @@ function Update-ModelBox {
     $sel = if ($cur -eq 'auto') { 'auto (rápida⇄forte)' } else { $cur }
     if ($items -notcontains $sel) { $sel = $items[0] }
     $ModelBox.SelectedItem = $sel
-    $ModelText.Text = $sel
+    $script:modelLabel = $sel
+    Update-CtxMeter
 }
 $ModelBox.Add_SelectionChanged({
     $sel = [string]$ModelBox.SelectedItem
     $m = if ($sel -eq 'auto (rápida⇄forte)') { 'auto' } else { $sel }
     $cfg.model = $m; Save-Config
     if ($null -ne $script:engine) { $script:engine.SetModel($m) }
-    $ModelText.Text = $sel
+    $script:modelLabel = $sel
+    Update-CtxMeter
     $StatusText.Text = "modelo: $sel"
 })
 
