@@ -58,6 +58,15 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   `zquick.json`; tools externas ganham prefixo `mcp_<srv>_<tool>` e
   schema saneado (sem `pattern`); até 6 servidores × 40 tools, sobem no
   primeiro envio, processos encerrados ao sair/trocar perfil
+- **Subagente de leitura** (`research`): agente com contexto próprio
+  que não vê a conversa — investiga sozinho (até 6 rodadas, só
+  leitura, tools em paralelo) e devolve um relatório como tool_result;
+  a conversa principal fica limpa (só a conclusão entra nela); deltas/
+  fontes/TTFT do sub suprimidos do card principal
+- **Skills**: playbooks `.md` em `skills\` ao lado do app — nome e
+  descrição (frontmatter `name:`/`description:`) listados no system
+  (cap 20); `skill_read` carrega as instruções completas sob demanda;
+  só entra nas tools quando existir pelo menos uma
 - Botão **⏹ Parar** (parcial preservada), **fila de mensagens** durante
   a resposta, retry com backoff 1/3/8s (429/5xx/rede), watchdog de
   stream (120s sem dados corta o turno)
@@ -120,7 +129,8 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   `test-planreal`), shell persistente (`test-shell`), @menção
   (`test-atdialog`), busca server/cache (`test-zaiserver`, `test-zai-cache`),
   paralelo+MCP (`test-parallel-engine`, `test-mcp-engine` +
-  fixture `test-mcp-server.ps1`, `test-par4-ui`)
+  fixture `test-mcp-server.ps1`, `test-par4-ui`), subagente/skills
+  (`test-sub-engine` com API real, `test-skills-engine`, `test-wave5-ui`)
 
 ## Arquitetura em 1 parágrafo
 
@@ -128,7 +138,11 @@ UI WPF na thread STA; engine C# (`HttpClient`/SSE) em thread própria
 comunicando-se por `ConcurrentQueue` drenada por `DispatcherTimer` de
 80ms. Loop agêntico até 12 rodadas; `ExecTools` dispara as tools de
 leitura em paralelo (fase A lança, fase B recolhe na ordem original —
-escritas/gates seriais). Servidores MCP vivem como processos filhos
+escritas/gates seriais). A tool `research` roda um loop próprio
+(`SubResearch`: até 6 rodadas + fechamento sem tools, histórico
+separado, `_subDepth` suprime delta/fontes/TTFT do sub no card
+principal). Skills são parseadas no PS (frontmatter) e entregues ao
+engine via `SetSkills`. Servidores MCP vivem como processos filhos
 stdio (JSON-RPC linha a linha, id casado na resposta; `initialize` →
 `tools/list` → `tools/call`, resultados truncados em 8 KB). Busca
 server-side chega como blocos
@@ -148,10 +162,12 @@ fecharam as 16 — edição com diff, grep, retry, Parar, memória,
 sempre-permitir, fila, shell persistente, @menção, ask_user
 multi+preview, modo plano, cache de prompt, verificação pós-escrita,
 medidor de contexto, **tools de leitura em paralelo** e **cliente
-MCP**. O que resta (skills/plugins dedicados, subagents) é ecossistema,
-não capacidade. E o ZQuick faz coisas que o Claude Code não faz:
-residente Alt+Q + bandeja, anexos por Ctrl+V, histórico retomável com
-imagens.
+MCP**. A **Onda 5** (`fd14a10`) foi além do comparativo: **subagente
+de leitura** com contexto próprio (estilo Explore/Task do Claude
+Code) e **skills** em `.md` (estilo skills do Claude Code). O que
+resta é plugins de propósito específico. E o ZQuick faz coisas que o
+Claude Code não faz: residente Alt+Q + bandeja, anexos por Ctrl+V,
+histórico retomável com imagens.
 
 ## Versões
 
@@ -164,6 +180,7 @@ imagens.
 | `9e62c41` | Onda 2 — file_edit com diff, memória, "Sempre permitir", fila, watchdog SSE |
 | `c62e720` | Onda 3 — busca server-side Z.ai, prompt cache, shell persistente, @menção, ask_user multi+preview, modo plano |
 | `7bd4b0e` | Onda 4 — tools de leitura em paralelo (ordem preservada), cliente MCP stdio (`mcpServers`) |
+| `fd14a10` | Onda 5 — subagente de leitura (`research`, contexto próprio) + skills `.md` (`skill_read`) |
 
 ## Notas de engenharia (lições)
 
@@ -187,5 +204,9 @@ imagens.
   por instantes** — toda leitura em teste precisa de retry (10×150ms);
   e o log **não tem data** (só HH:mm:ss), então filtro por hora
   casa sujeira de dias anteriores — usar offset de bytes como marca.
+- **Asserts de log são acento-sensíveis** (`-match` ignora caixa, não
+  acento: "relatorio" ≠ "relatório") — padrão agnóstico `relat.rio`；
+  e emoji astral em regex .NET conta **2 UTF-16 units** — `.{0,2}` não
+  cobre "🤖 " (3 units).
 
 Log de diagnóstico: `%TEMP%\zquick.log`.
