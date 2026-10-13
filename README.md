@@ -3,8 +3,9 @@
 Assistente rápido residente no Windows, estilo Copilot Quick View.
 Uma janela compacta sempre à mão (**Alt+Q**) que responde em streaming,
 busca na web, lê prints e arquivos (PDF, DOCX, texto/código), guarda o
-histórico de conversas e **age no Windows** — cria notas, move/renomeia
-arquivos, executa PowerShell — com autorização explícita para cada ação.
+histórico de conversas e **age no Windows** — sessão PowerShell
+persistente, edição cirúrgica com diff, planos aprovados em lote —
+sempre com autorização explícita para o que altera algo.
 
 Escrito em **PowerShell + WPF** num único arquivo (`zquick.ps1`, com engine
 C# embutido via `Add-Type`), compatível com Windows PowerShell 5.1 e pwsh 7+.
@@ -13,13 +14,54 @@ Zero dependências: o exe é gerado com PS2EXE e roda em qualquer Windows.
 Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
 (`/v1/messages`) — perfis múltiplos no `zquick.json` (Z.ai, Kimi, ...).
 
+## Recursos
+
+**Consulta**
+- Streaming com fontes clicáveis `[1] [2]`; modo **auto** flash⇄modelo
+  grande (o próprio modelo decide escalar com `escalate`; pergunta de
+  atualidade ou geração longa sobe direto)
+- **Busca web** (`searchEngine`): `zai-server` = web_search **no servidor**
+  (tool `web_search_20250305` no próprio `/v1/messages` — melhor qualidade,
+  recency filter automático; **preferido**) · `bing` = cadeia cliente
+  (Bing RSS → Bing HTML → web-search Z.ai) · `zai` = API de tools nativa
+- **Prompt cache**: `cache_control` no system + tools (sonda Z.ai:
+  1550 → 14 input tokens de entrada nas trocas seguintes)
+- Visão (prints) via `visionModel` do perfil — no Z.ai quem lê imagem é
+  o flash; o glm-5.3 grande não enxerga
+- Anexos PDF (document block) / DOCX / texto; histórico retomável com
+  as imagens de volta; compactação oferecida com aviso + **medidor de
+  contexto** no rodapé
+- **@menção**: `@` no começo de palavra abre o seletor de arquivos; o
+  caminho entra no texto e o modelo lê com file_read/file_grep
+
+**Agente Windows (tools)**
+- Leitura livre: `file_list`, `file_read`, `file_grep` (busca de
+  conteúdo recursiva, caps 50 matches/400 arquivos/8s)
+- Muda algo = confirma na janela: `file_edit` (troca exata de trecho com
+  **diff vermelho/verde**, backup `.zquick.bak`, verificação na
+  re-leitura), `file_write`, `file_move`, `file_delete` (Lixeira)
+- `run_ps` numa **sessão de shell persistente por conversa**: pasta
+  atual, variáveis e funções criadas numa chamada existem na seguinte
+- `note_add` (Documentos\ZQuick-Notas) e `memory_save` (fatos duráveis
+  em `zquick-memory.md`, injetados no system de TODAS as conversas)
+- Confirmação com ✅ Executar / **✔ Sempre** (allowlist persistida no
+  json) / ✕ Negar, expira em 45s
+- **Modo plano**: 3+ ações viram um plano (título + passos) aprovado
+  UMA vez — executa tudo sem confirmações individuais
+- **ask_user**: até 4 perguntas de uma vez, múltipla escolha ou texto
+  livre, com preview mono lado a lado (código/mockup/config)
+- Botão **⏹ Parar** (parcial preservada), **fila de mensagens** durante
+  a resposta, retry com backoff 1/3/8s (429/5xx/rede), watchdog de
+  stream (120s sem dados corta o turno)
+
 ## Arquivos
 
 | Arquivo | O que é |
 |---|---|
 | `zquick.ps1` | o app inteiro (fonte) |
-| `zquick.json` | config: perfil/modelo, atalho, tema, opacidade, perfis de provedores |
+| `zquick.json` | config: perfil/modelo, atalho, busca, cache, tema, opacidade, perfis, allowlist |
 | `build-exe.ps1` | gera `zquick.exe` com PS2EXE (rodar com powershell.exe 5.1) |
+| `check-engine.ps1` | valida o engine C# no pwsh 7 e no 5.1 (rodar com pwsh) |
 | `kit/` | kit de distribuição: INSTALAR/DESINSTALAR, LEIA-ME e template de config |
 | `test-*.ps1` | testes (engine headless + E2E de UI via keybd_event/UIA — rodar com `pwsh -STA`) |
 
@@ -29,12 +71,23 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
 # direto (recomendado pwsh 7+; aceita 5.1)
 pwsh -STA -File zquick.ps1
 
-# residente oculto (como a tarefa de logon faz)
+# residente oculto (como a tarefa de logon "ZQuick" faz)
 pwsh -STA -WindowStyle Hidden -File zquick.ps1 -Hidden
 ```
 
 A chave da API fica em `~/.claude/settings.json` (`env.ANTHROPIC_AUTH_TOKEN`)
 ou direto no `zquick.json` do perfil.
+
+## Config (zquick.json)
+
+| Chave | Default | O que faz |
+|---|---|---|
+| `searchEngine` | `bing` | `zai-server` (server-side, recomendado) · `bing` · `zai` |
+| `promptCache` | `true` | cache_control no system+tools |
+| `hotkey` / `maxTokens` / `hideOnBlur` | `alt+q` / 4096 / false | atalho, teto da resposta, fechar ao perder foco |
+| `windowOpacity` / `theme` | 1.0 / — | opacidade e paleta (15 chaves hex) |
+| `allow` | — | `runPs` (comandos exatos) e `paths` (pastas) do "✔ Sempre" |
+| `profiles.{nome}` | — | `label, baseUrl, apiKey, fastModel, bigModel, visionModel, models[]` |
 
 ## Build do exe
 
@@ -47,23 +100,69 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
 
 ## Testes
 
-- `test-xaml.ps1` — valida os XAMLs (parse + FindName)
-- `test-send-ui.ps1` / `test-vision-ui.ps1` / `test-search-ui.ps1` — E2E de UI
-- `test-agent-e2e.ps1` — agente local: nota, renomear com confirmação, anexos txt/PDF
-- `test-esc-ui.ps1`, `test-reopen-ui.ps1`, `test-hist-img.ps1`, `test-histbtn-ui.ps1` — teclas, reabertura, histórico
-
-Todos os de UI precisam do app residente rodando e injetam teclado/mouse;
-veredito pelo log (`%TEMP%\zquick.log`).
+- Estáticos: `check-engine.ps1` (C# nos 2 runtimes), `test-xaml.ps1`
+  (parse + FindName dos XAMLs), `test-surgery.ps1` (costura JSON da pré-busca)
+- E2E de UI (app residente rodando; oráculo = `%TEMP%\zquick.log`):
+  envio/visão/busca (`test-send/vision/search-ui`), agente e confirmações
+  (`test-agent-e2e`, `test-always`, `test-edit`), teclas/histórico
+  (`test-esc`, `test-reopen`, `test-hist-img`, `test-histbtn`, `test-close`),
+  ondas — Parar/grep (`test-stop`, `test-grep`), memória/fila
+  (`test-memory`, `test-queue`), ask/plan (`test-ask`, `test-panel`,
+  `test-planreal`), shell persistente (`test-shell`), @menção
+  (`test-atdialog`), busca server/cache (`test-zaiserver`, `test-zai-cache`)
 
 ## Arquitetura em 1 parágrafo
 
 UI WPF na thread STA; engine C# (`HttpClient`/SSE) em thread própria
-comunicando-se por `ConcurrentQueue` drenada por `DispatcherTimer` de 80ms.
-Loop agêntico até 6 rodadas com tools (`web_search`, `fetch_page`,
-`file_list/read/write/move/delete`, `note_add`, `run_ps`); ações que alteram
-algo passam por uma barra de confirmação (✅/✕, expira em 45s); exclusão vai
-para a Lixeira via `SHFileOperation`. Conversas salvas por completo
-(inclusive imagens em base64) em `history/conv-*.json`. Compactação automática
-oferecida quando a conversa cresce (resumo via modelo flash).
+comunicando-se por `ConcurrentQueue` drenada por `DispatcherTimer` de
+80ms. Loop agêntico até 12 rodadas; busca server-side chega como blocos
+`server_tool_use`/`tool_result` no stream (replay cru no histórico;
+blocos de texto sintetizados pelo servidor são filtrados). `run_ps`
+fala com um filho pwsh/powershell vivo por pipes (comando em base64
+UTF-16LE + sentinela `__ZQEND__<tag>|<cwd>|<exit>`). Plano e ask_user
+são gates (ManualResetEventSlim) que pausam o turno até a UI decidir.
+Conversas salvas por completo (inclusive imagens em base64) em
+`history/conv-*.json`; compactação oferecida no limiar (28 msgs/150 KB).
+
+## Paridade com o Claude Code
+
+Análise de 16 lacunas em `~/zquick-vs-claude.html` (13/10/2026).
+As **Ondas 1–3** (commits `634966f`, `9e62c41`, `c62e720`) fecharam 14
+delas — edição com diff, grep, retry, Parar, memória, sempre-permitir,
+fila, shell persistente, @menção, ask_user multi+preview, modo plano,
+cache de prompt, verificação pós-escrita, medidor de contexto. Restam
+abertas só o paralelismo de tools e o ecossistema MCP. E o ZQuick faz
+coisas que o Claude Code não faz: residente Alt+Q + bandeja, anexos por
+Ctrl+V, histórico retomável com imagens.
+
+## Versões
+
+| Commit | O que trouxe |
+|---|---|
+| `a87832e` | v3 — busca+visão+histórico+tema, anexos, agente Windows |
+| `1cd86c5` | fix X/Alt+F4 oculta em vez de fechar (tray) |
+| `1d273ec` | ask_user — perguntas de múltipla escolha |
+| `634966f` | Onda 1 — Parar, retry/backoff, file_grep, ctx meter, rounds 12 |
+| `9e62c41` | Onda 2 — file_edit com diff, memória, "Sempre permitir", fila, watchdog SSE |
+| `c62e720` | Onda 3 — busca server-side Z.ai, prompt cache, shell persistente, @menção, ask_user multi+preview, modo plano |
+
+## Notas de engenharia (lições)
+
+- **UTF-8 com BOM obrigatório** — sem ele o 5.1 lê o script como ANSI e
+  o parse quebra em qualquer acento.
+- Engine C# é **C#5/.NET Framework** (compatível com o 5.1): parser JSON
+  minimalista embutido (`MJ`), sem `out var`, streams no lugar de
+  `ReadAsStringAsync(ct)`.
+- **Tool schemas SEM a chave `pattern`** — a Z.ai rejeita com erro 1210.
+- No pwsh, `Add-Type` sem `-ReferencedAssemblies`; no 5.1, com
+  `System.Net.Http.dll` — branch por versão.
+- `OpenFileDialog` do WPF .NET Core (pwsh 7) **não tem `Owner` setável**
+  — envolver em try/catch ou o app cai na primeira @menção.
+- E2E de UI nesta máquina: **texto injetado não vira texto em WPF**
+  (TSF/IME descarta keybd_event/SendInput UNICODE; keydown puro como
+  Enter/Esc/Alt+Q chega) — caminhos de digitação são testados via
+  ValuePattern ou hooks `/uitest`.
+- `SendInput` x64: a union do INPUT precisa do MOUSEINPUT para
+  `SizeOf(INPUT)` = 40 — sem ele injeta nada e retorna 0.
 
 Log de diagnóstico: `%TEMP%\zquick.log`.
