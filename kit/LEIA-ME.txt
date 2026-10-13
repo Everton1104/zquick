@@ -16,10 +16,13 @@ O QUE É
     imagem — na Z.ai quem lê print é o flash); pergunta com cara de
     fato atual ("hoje", "cotação", "versão", "placar"...) → busca
     disparada em paralelo + modelo forte na hora (~8s).
-  • Busca em cadeia: Bing RSS → Bing HTML → web-search da Z.ai (se o
-    plano tiver saldo). Fontes clicáveis [1] [2].
+  • Busca: searchEngine "bing" = cadeia cliente (Bing RSS → Bing HTML →
+    web-search da Z.ai); "zai-server" = busca roda NO SERVIDOR da Z.ai
+    (web_search integrado ao /v1/messages — melhor qualidade e filtro
+    de data automático; rejeitado, cai pro Bing sozinho). Fontes
+    clicáveis [1] [2].
   • Requisitos: NENHUM. Usa o PowerShell nativo do Windows (.exe de
-    ~140 KB, não instala nada).
+    ~240 KB, não instala nada).
 
 INSTALAÇÃO (em outro PC)
   1. Copie a pasta Kit-ZQuick inteira para o PC de destino.
@@ -65,6 +68,14 @@ USO
   Esc ......... FECHA a conversa: esconde a janela e zera o chat
                 (o rascunho não-enviado fica; app segue na bandeja)
   Ctrl+N ...... nova conversa (o mesmo, sem esconder a janela)
+  @ ........... @ no começo de palavra abre o seletor de ARQUIVOS do
+                Windows: o caminho escolhido entra no texto e o modelo
+                lê o arquivo por conta própria. Cancelar deixa o @ cair
+                como texto comum (e-mails e @usuário não abrem nada).
+  ⏹ Parar ..... durante a resposta o botão Enviar vira "Parar": corta
+                na hora (o texto que já chegou fica no card).
+  ✉ ........... digitar durante a resposta ENFILEIRA a mensagem: ela
+                vai sozinha quando a resposta acabar.
   Ícone Z na bandeja: duplo clique = mostrar; botão direito = Sair.
 
 ANEXOS DE ARQUIVO
@@ -80,13 +91,55 @@ ANEXOS DE ARQUIVO
 AGENTE WINDOWS (tarefas no PC)
   O ZQuick também AGE no seu Windows, com ferramentas dedicadas:
   • file_list / file_read — listar pastas e ler arquivos (livre)
+  • file_grep — buscar DENTRO dos arquivos de uma pasta (recursivo;
+    acha onde um termo está definido/definido sem abrir arquivo
+    por arquivo)
+  • file_edit — edição cirúrgica (troca um trecho EXATO por outro,
+    com diff vermelho/verde para aprovar; backup .zquick.bak)
   • file_write / file_move / file_delete — criar, renomear, mover;
     apagar vai SEMPRE para a Lixeira
   • note_add — grava notas em Documentos\ZQuick-Notas (markdown)
-  • run_ps — executa QUALQUER comando PowerShell (abrir programas,
+  • memory_save — grava fatos DURÁVEIS sobre você/suas máquinas/
+    preferências que valem para TODAS as conversas futuras
+  • run_ps — executa QUALQUER comando PowerShell numa SESSÃO
+    PERSISTENTE por conversa: pasta atual, variáveis e funções
+    criadas numa chamada existem na seguinte (abrir programas,
     mexer em configurações, processos, verificações...)
   Toda ação que altera algo aparece na janela para você autorizar:
-  uma barra com ✅ Executar / ✕ Negar (expira sozinha em 45s).
+  uma barra com ✅ Executar / ✔ Sempre (gravar exceção e não
+  perguntar mais para isto) / ✕ Negar (expira sozinha em 45s).
+  PLANO: para tarefas com 3+ ações, o assistente propõe um PLANO
+  (título + passos) e você aprova UMA vez — tudo roda sem pedir
+  confirmação individual. Rejeitar = nada executa.
+  PERGUNTAS: quando a decisão é sua (qual abordagem, qual arquivo,
+  escopo...), ele pergunta na própria janela com opções prontas —
+  uma ou várias perguntas de uma vez, múltipla escolha ou texto
+  livre, com preview lado a lado quando compara código/mockup.
+  PARALELO: chamadas de LEITURA pedidas juntas (buscar, listar,
+  ler, grep) rodam em paralelo — duas buscas ou buscar+ler no
+  mesmo turno leva o tempo de uma só.
+  MCP: o ZQuick é cliente MCP — cadastre servidores stdio em
+  "mcpServers" do zquick.json e as tools deles aparecem para o
+  assistente (prefixo mcp_) como se fossem nativas. Exemplo:
+    "mcpServers": {
+      "exemplo": { "command": "cmd",
+                   "args": ["/c", "npx", "-y", "@exemplo/mcp-server"] }
+    }
+  (servidor npx/node no Windows: use "cmd /c npx ..."; até 6
+  servidores, 40 tools cada; sobem no primeiro envio e são
+  encerrados ao sair do app)
+  SUBAGENTE: para investigações amplas (varrer muitos arquivos/
+  pastas, buscas repetidas na web) o assistente pode disparar um
+  SUBAGENTE de leitura — um agente à parte que NÃO vê a conversa,
+  investiga sozinho com as ferramentas de leitura e devolve um
+  relatório. A conversa fica limpa: só a conclusão entra nela.
+  SKILLS: playbooks .md na pasta skills ao lado do app. O nome e
+  a descrição (cabeçalho --- name:/description: ---) de cada um
+  aparecem para o assistente; quando a tarefa combina, ele carrega
+  as instruções completas com skill_read e as segue. Crie os seus
+  (formatos de trabalho, checklists, rotinas) — vira arquivo em
+  vez de repetir no chat. Reabra o app (Sair na bandeja → abrir)
+  depois de criar/remover skills.
   Exemplos: "crie uma nota com a reunião de sexta 15h", "renomeie
   o arquivo X para Y", "abra o Bloco de Notas", "quanto de disco
   livre no C?", "mova os PDFs da Área de Trabalho para a pasta X".
@@ -102,10 +155,19 @@ CONVERSA LONGA (compactação)
 CONFIG EXTRA (zquick.json, topo)
   hotkey ......... "alt+q" (win/ctrl/alt/shift+tecla; combinação com
                    Win depende de hook instável — evite)
-  maxTokens ...... limite da resposta (2048)
+  maxTokens ...... limite da resposta (4096)
   hideOnBlur ..... true = fecha ao perder foco
-  searchEngine ... "bing" (grátis) ou "zai" (busca server-side, se tiver saldo)
+  searchEngine ... "bing" (grátis, cliente) | "zai-server" (busca no
+                   SERVIDOR da Z.ai — melhor qualidade; recomendado)
+                   | "zai" (API de tools da Z.ai, se tiver saldo)
+  promptCache .... true = cache do prompt no servidor (a Z.ai aceita:
+                   as perguntas seguintes da conversa ficam mais
+                   baratas e o 1º token chega mais rápido)
   systemPrompt ... troca a personalidade do assistente
+  mcpServers ..... servidores MCP (stdio): { "nome": { "command":
+                   "...", "args": [...] } } — as tools deles ficam
+                   disponíveis ao assistente com prefixo mcp_ (ver
+                   AGENTE WINDOWS acima)
 
 PERSONALIZAÇÃO (zquick.json, topo)
   windowOpacity .. opacidade da janela: 1.0 = opaca, 0.8 = 80%, 0.5 =

@@ -11,6 +11,17 @@ if (-not (Test-Path (Join-Path $dst 'zquick.json'))) {
     Copy-Item (Join-Path $src 'zquick.json') $dst -Force
 }
 
+# skills (Onda 5): playbooks .md — copia os exemplos sem sobrescrever os do usuario
+$srcSkills = Join-Path $src 'skills'
+if (Test-Path $srcSkills) {
+    $dstSkills = Join-Path $dst 'skills'
+    New-Item -ItemType Directory -Force $dstSkills | Out-Null
+    Get-ChildItem $srcSkills -Filter *.md -File | ForEach-Object {
+        $t = Join-Path $dstSkills $_.Name
+        if (-not (Test-Path $t)) { Copy-Item $_.FullName $t -Force }
+    }
+}
+
 # atalho na Inicializacao ( abre oculto no tray )
 $lnkPath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ZQuick.lnk'
 $ws = New-Object -ComObject WScript.Shell

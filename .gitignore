@@ -16,3 +16,6 @@ teste-arquivo.txt
 # memoria do usuario (fatos duraveis gravados pelo propio app) + backups de edicao
 zquick-memory.md
 *.zquick.bak
+
+# skills do usuario (playbooks .md — exemplos vivem em kit/skills)
+/skills/

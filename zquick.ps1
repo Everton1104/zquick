@@ -136,6 +136,42 @@ function Get-MemoryBlock {
     } catch { return '' }
 }
 
+# ---------- skills (Onda 5): playbooks .md em <app>\skills — listados no system, abertos via skill_read ----------
+$skillsDir = Join-Path $appDir 'skills'
+function Get-SkillList {
+    # devolve array de @(nome, caminho, descricao); frontmatter '--- name:/description: ---'
+    # com fallback p/ nome do arquivo e 1a linha util (cap 20 skills)
+    try {
+        if (-not (Test-Path -LiteralPath $skillsDir)) { return ,@() }
+        $out = @()
+        foreach ($f in @(Get-ChildItem -LiteralPath $skillsDir -Filter *.md -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $t = [IO.File]::ReadAllText($f.FullName)
+            $name = $null; $desc = $null
+            if ($t -match '(?s)^---\r?\n(.*?)\r?\n---') {
+                foreach ($ln in ($Matches[1] -split "\r?\n")) {
+                    if ($ln -match '^name:\s*(.+)$') { $name = $Matches[1].Trim() }
+                    elseif ($ln -match '^description:\s*(.+)$') { $desc = $Matches[1].Trim() }
+                }
+            }
+            if (-not $name) { $name = [IO.Path]::GetFileNameWithoutExtension($f.Name) }
+            if (-not $desc) {
+                $body = $t -replace '(?s)^---.*?---\s*', ''
+                $first = @($body -split "\r?\n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+                if ($first) { $desc = [string]$first[0] }
+            }
+            $out += ,@([string]$name, [string]$f.FullName, [string]$desc)
+            if ($out.Count -ge 20) { break }
+        }
+        return ,$out
+    } catch { return ,@() }
+}
+function Get-SkillsBlock {
+    $list = Get-SkillList
+    if (-not $list -or $list.Count -eq 0) { return '' }
+    $lines = foreach ($s in $list) { "- $($s[0]) — $($s[2])" }
+    return "`n`n## Skills (playbooks do usuário — quando a tarefa combinar com um deles, chame skill_read com o nome exato e siga as instruções)`n" + ($lines -join "`n")
+}
+
 # ---------- engine C# (rede, SSE, agente, busca) — C#5/.NET Framework 4.x compativel ----------
 $engineCs = @'
 using System;
@@ -878,7 +914,7 @@ public class Engine {
                     if (nm == "web_search") { src = new List<string>(); Emit("status", "\U0001F50D " + (query ?? "?")); o = DoSearch(query, ct, src); }
                     else if (nm == "fetch_page") { Emit("status", "\U0001F4C4 " + (url ?? "?")); o = DoFetch(url, ct); }
                     else { Emit("status", "⚙ " + nm + "…"); o = LocalTool(nm, inp, ct); }
-                    if (src != null && src.Count > 0) Emit("sources", "[" + string.Join(",", src.ToArray()) + "]");
+                    if (src != null && src.Count > 0 && _subDepth == 0) Emit("sources", "[" + string.Join(",", src.ToArray()) + "]");
                     outs[idx] = o;
                 } catch (Exception ex) { outs[idx] = "ERRO: " + ex.Message; }
             });
@@ -915,6 +951,11 @@ public class Engine {
                         }
                     }
                 }
+                else if (b.Name == "research") {
+                    string task = H.S(inp, "task"); string hint = H.S(inp, "hint");
+                    if (string.IsNullOrEmpty(task)) outp = "ERRO: informe 'task' (a tarefa completa e autocontida — o subagente NÃO vê esta conversa).";
+                    else { Emit("status", "\U0001F916 subagente de leitura…"); outp = SubResearch(task, hint, ct); }
+                }
                 else if (b.Name == "escalate") {
                     _useBig = true;
                     Emit("status", "↗ encaminhando ao " + _big + "…");
@@ -930,6 +971,75 @@ public class Engine {
             resJson.Append("{\"type\":\"tool_result\",\"tool_use_id\":").Append(J(b.Id)).Append(",\"content\":").Append(J(outp)).Append("}");
         }
         return resJson.ToString();
+    }
+
+    // ---------- subagente de leitura (Onda 5): contexto PROPRIo, so' leitura ----------
+    // A tool 'research' nasce um loop agentico SEPARADO (ate' 6 rodadas + 1 fechamento
+    // sem tools) que so' ve web_search/fetch_page/file_list/file_read/file_grep — nao
+    // altera nada, nao ve a conversa original e nao pode spawnar outro sub. O texto do
+    // sub NAO vai pro card (deltas suprimidos por _subDepth); o relatorio final volta
+    // como tool_result — a conversa principal fica limpa (so' a conclusao, nao os dumps).
+    const int SubMaxRounds = 6;
+
+    string SubBody(string sys, List<string> hist, bool withTools) {
+        var tools = new List<string>();
+        if (withTools) {
+            if (_srvSearch) tools.Add("{\"type\":\"web_search_20250305\",\"name\":\"web_search\"}");
+            else tools.Add("{\"name\":\"web_search\",\"description\":\"Search the web for current information. Returns numbered results with title, URL and snippet.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}");
+            tools.Add("{\"name\":\"fetch_page\",\"description\":\"Fetch one web page by absolute http(s) URL and return its readable text (truncated).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}}");
+            tools.Add("{\"name\":\"file_list\",\"description\":\"List files and folders of a directory on the user's Windows.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}}");
+            tools.Add("{\"name\":\"file_read\",\"description\":\"Read a text file from the user's Windows (first 8000 chars).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}");
+            tools.Add("{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (recursive): matching lines as file:line: text.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"glob\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}}");
+        }
+        string m = !_auto ? _model : (_useBig ? _big : _model);
+        return "{\"model\":\"" + m + "\",\"max_tokens\":" + _maxTokens + ",\"stream\":true,\"system\":" + J(sys)
+            + ",\"tools\":[" + string.Join(",", tools.ToArray()) + "],\"messages\":[" + string.Join(",", hist.ToArray()) + "]}";
+    }
+
+    public string SubResearch(string task, string hint, CancellationToken ct) {
+        if (_subDepth > 0) return "ERRO: o subagente não pode spawnar outro subagente.";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string sys = "Você é um SUBAGENTE de pesquisa do ZQuick, no Windows do usuário, com contexto PRÓPRIO — você NÃO vê a conversa original e não pode conversar com ninguém. Execute a tarefa sozinho até o fim usando as ferramentas de LEITURA (web_search, fetch_page, file_list, file_read, file_grep); você não altera nada. Ao terminar, devolva um RELATÓRIO final denso e direto em português: os achados concretos (caminhos, valores, trechos relevantes como arquivo:linha, URLs) e, se houver, o que não conseguiu confirmar. Sem preâmbulo."
+            + (string.IsNullOrEmpty(hint) ? "" : "\n\nDica de onde começar: " + hint);
+        var hist = new List<string>();
+        hist.Add("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":" + J(task + "\n\n(Investigue com as ferramentas e depois entregue o relatório final.)") + "}]}");
+        string lastText = "";
+        _subDepth = 1;
+        try {
+            for (int round = 0; round < SubMaxRounds; round++) {
+                if (ct.IsCancellationRequested) break;
+                Emit("status", "\U0001F916 subagente: investigando (rodada " + (round + 1) + "/" + SubMaxRounds + ")…");
+                string stop; bool streamed;
+                List<Blk> blocks = StreamOnce(SubBody(sys, hist, true), ct, out stop, out streamed);
+                var bj = new List<string>();
+                var tbs = new List<Blk>();
+                foreach (Blk b in blocks) {
+                    string j2 = BlkJson(b); if (j2 != null) bj.Add(j2);
+                    if (b.Kind == "text" && !b.Trace && b.Text.Length > 0) lastText = b.Text.ToString();
+                    if (b.Kind == "tool_use") tbs.Add(b);
+                }
+                hist.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}");
+                if (stop != "tool_use" || tbs.Count == 0) break;
+                string resJson = ExecTools(tbs, ct);   // so' tools de leitura — rodam em paralelo
+                hist.Add("{\"role\":\"user\",\"content\":[" + resJson + "]}");
+                if (sw.Elapsed.TotalSeconds > 150) { Emit("status", "\U0001F916 subagente: tempo limite — colhendo o relatório…"); break; }
+            }
+            // garantia de entrega: sem tools no body o modelo so' pode responder texto
+            if (lastText.Trim().Length == 0 && !ct.IsCancellationRequested) {
+                Emit("status", "\U0001F916 subagente: fechando o relatório…");
+                hist.Add("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Agora entregue o RELATÓRIO FINAL completo (sem chamar ferramentas).\"}]}");
+                string stop2; bool streamed2;
+                foreach (Blk b in StreamOnce(SubBody(sys, hist, false), ct, out stop2, out streamed2))
+                    if (b.Kind == "text" && !b.Trace && b.Text.Length > 0) lastText = b.Text.ToString();
+            }
+        } catch (Exception ex) {
+            if (!ct.IsCancellationRequested) Emit("note", "subagente: " + Trunc(ex.Message, 120));
+            if (lastText.Trim().Length == 0) return "ERRO do subagente: " + Trunc(ex.Message, 300);
+        } finally { _subDepth = 0; }
+        if (ct.IsCancellationRequested && lastText.Trim().Length == 0) return "cancelado";
+        int secs = (int)sw.Elapsed.TotalSeconds;
+        Emit("status", "\U0001F916 subagente: relatório pronto (" + secs + "s)");
+        return "RELATÓRIO DO SUBAGENTE de leitura (" + secs + "s):\n" + Trunc(lastText.Trim(), 8000);
     }
 
     // ---------- cliente MCP minimo (Onda 4): servidores stdio JSON-RPC ----------
@@ -1050,6 +1160,9 @@ public class Engine {
     string _mcpCfg;                                          // json cru de cfg.mcpServers
     readonly List<McpSrv> _mcp = new List<McpSrv>();
     volatile bool _mcpTried;
+    // skills (Onda 5): playbooks .md ao lado do app — o PS parseia e entrega {name,file}[]
+    readonly List<string[]> _skills = new List<string[]>();  // {nome, caminho}
+    volatile int _subDepth;   // >0 = dentro do subagente de leitura: delta/sources/note do sub NAO poluem o card
 
     public void SetMcpConfig(string json) { _mcpCfg = json; }
 
@@ -1093,6 +1206,22 @@ public class Engine {
 
     public void ShutdownMcp() { foreach (McpSrv s in _mcp) s.Kill(); _mcp.Clear(); }
 
+    // skills (Onda 5): lista {name,file} entregue pelo PS (o parser de frontmatter vive la')
+    public void SetSkills(string json) {
+        _skills.Clear();
+        List<object> arr = MJ.Parse(json) as List<object>;
+        if (arr == null) return;
+        foreach (object o in arr) {
+            Dictionary<string, object> d = o as Dictionary<string, object>;
+            if (d == null) continue;
+            string n = H.S(d, "name"); string f = H.S(d, "file");
+            if (!string.IsNullOrEmpty(n) && !string.IsNullOrEmpty(f)) _skills.Add(new string[] { n, f });
+        }
+    }
+    public int SkillCount() { return _skills.Count; }
+    // util p/ testes: a tool esta' declarada no body que seria enviado agora?
+    public bool ToolDeclared(string name) { return BuildBody("sys").Contains("\"name\":\"" + name + "\""); }
+
     // remove "pattern" recursivo do schema (Z.ai rejeita com erro 1210)
     static object StripPattern(object o) {
         Dictionary<string, object> d = o as Dictionary<string, object>;
@@ -1135,6 +1264,9 @@ public class Engine {
         tools.Add("{\"name\":\"run_ps\",\"description\":\"Run a PowerShell command on the user's Windows (open apps, system settings, processes, checks...). Commands run in ONE PERSISTENT session per conversation: current directory, variables and functions SURVIVE between calls (set $x in one call, read $x in the next). ALWAYS shown to the user for approval before running. Optional 'timeout' in seconds (5-120, default 60). Do NOT delete user files with this (use file_delete). Keep commands short.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"PowerShell command line\"},\"timeout\":{\"type\":\"number\",\"description\":\"max seconds to wait, 5-120 (default 60)\"}},\"required\":[\"command\"]}}");
         tools.Add("{\"name\":\"ask_user\",\"description\":\"Ask the user multiple-choice questions (ONE or up to 4 at once) and wait for their picks. Use when the task has ambiguity or decisions the user should make (which approach, which file, scope, taste, a risky trade-off). Do NOT use it for anything you can decide yourself or verify with file_list/web_search, and never ask the same question twice. Send one question via question/header/multiSelect/options, or several via questions:[{question, header, multiSelect, options}] (max 4). 2-4 options each; each option: short label (1-5 words) + description of what it implies; optional 'preview' (mono text — code snippet, mockup or config shown beside the option; use it when comparing concrete artifacts). The user can always answer free text instead.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"the complete question in Portuguese, specific, ending with ?\"},\"header\":{\"type\":\"string\",\"description\":\"short chip label, max ~12 chars\"},\"multiSelect\":{\"type\":\"boolean\",\"description\":\"true = the user may pick several options\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"description\":\"concise option, 1-5 words\"},\"description\":{\"type\":\"string\",\"description\":\"what choosing this implies\"},\"preview\":{\"type\":\"string\",\"description\":\"mono preview shown beside the option (code/mockup/config)\"}},\"required\":[\"label\"]}},\"questions\":{\"type\":\"array\",\"description\":\"alternative: up to 4 questions at once\",\"items\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"},\"header\":{\"type\":\"string\"},\"multiSelect\":{\"type\":\"boolean\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"preview\":{\"type\":\"string\"}},\"required\":[\"label\"]}}},\"required\":[\"question\",\"options\"]}}},\"required\":[\"question\",\"options\"]}}");
         tools.Add("{\"name\":\"plan\",\"description\":\"Propose a multi-step plan of ACTIONS (create/edit/move/delete files, run commands) and wait for the user's approval ONCE. Approved: every listed action runs in this turn WITHOUT individual confirmations. Rejected: nothing runs. Use when the task needs 3+ steps that alter files or the system. Do NOT use it for read-only exploration or single actions.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\",\"description\":\"short plan title in Portuguese\"},\"steps\":{\"type\":\"array\",\"description\":\"ordered steps, each short (verb + object)\",\"items\":{\"type\":\"string\"}}},\"required\":[\"title\",\"steps\"]}}");
+        tools.Add("{\"name\":\"research\",\"description\":\"Spawn a READ-ONLY subagent with its own separate context to investigate and report back a dense summary (paths, values, file:line snippets, URLs). The subagent does NOT see this conversation — write a self-contained task. Use for wide scans (many files/folders, repeated web searches) so this conversation stays clean; NOT worth it for a single quick file_read/web_search.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"complete, self-contained research task in Portuguese: what to find, where to look, what to report\"},\"hint\":{\"type\":\"string\",\"description\":\"optional: where to start (folder path, URL or search term)\"}},\"required\":[\"task\"]}}");
+        if (_skills.Count > 0)
+            tools.Add("{\"name\":\"skill_read\",\"description\":\"Load the full instructions of one SKILL (a named playbook saved by the user). Call it when the task matches a skill listed in the system prompt, then follow those instructions.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"skill name exactly as listed in the system prompt\"}},\"required\":[\"name\"]}}");
         if (_auto && !_useBig && !_useVision) // vision-routed nao oferece escalate: o big nao enxerga
             tools.Add("{\"name\":\"escalate\",\"description\":\"Hand the question over to the larger, smarter model. Call this when the user's question needs deep reasoning, careful multi-step analysis, long code, or when you feel your answer would be noticeably better from a stronger model. Do NOT call it for quick factual questions, simple lookups, translations or chit-chat.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"short reason in Portuguese\"}}}}");
         // tools MCP (Onda 4): entram ANTES do cache_control (que cai na ultima =
@@ -1215,12 +1347,12 @@ public class Engine {
                             if (blocks.TryGetValue(idx, out blk)) {
                                 if (blk.Kind == "text" && !blk.Trace && !blk.Live && blk.Text.Length > 0) {
                                     if (SrvTrace(blk.Text.ToString())) blk.Trace = true;   // bloco curto sintetizado
-                                    else { blk.Live = true; Emit("delta", blk.Text.ToString()); }   // bloco curto que comeca com '*': decide so' no fim
+                                    else { blk.Live = true; if (_subDepth == 0) Emit("delta", blk.Text.ToString()); }   // bloco curto que comeca com '*': decide so' no fim
                                 }
                                 if (blk.Kind == "server_tool_use") {   // loga a query real da busca server
                                     Dictionary<string, object> sq = MJ.Parse(blk.Input.ToString()) as Dictionary<string, object>;
                                     string q2 = sq != null ? H.S(sq, "search_query") : null; if (q2 == null && sq != null) q2 = H.S(sq, "query");
-                                    Emit("status", "\U0001F50D " + (string.IsNullOrEmpty(q2) ? (blk.Name ?? "busca server") : q2));
+                                    if (_subDepth == 0) Emit("status", "\U0001F50D " + (string.IsNullOrEmpty(q2) ? (blk.Name ?? "busca server") : q2));
                                 }
                             }
                         } else if (typ == "content_block_delta") {
@@ -1231,20 +1363,20 @@ public class Engine {
                             string dk = H.S(del, "type");
                             if (dk == "text_delta") {
                                 string tx = H.S(del, "text"); if (tx == null) tx = "";
-                                if (ttft < 0) { ttft = swt.Elapsed.TotalSeconds; Emit("note", string.Format("1º token em {0:0.0}s", ttft)); }
+                                if (ttft < 0) { ttft = swt.Elapsed.TotalSeconds; if (_subDepth == 0) Emit("note", string.Format("1º token em {0:0.0}s", ttft)); }
                                 streamed = true;
                                 blk.Text.Append(tx);
                                 if (blk.Kind == "text") {
-                                    if (blk.Live) Emit("delta", tx);
+                                    if (blk.Live && _subDepth == 0) Emit("delta", tx);
                                     else if (!blk.Trace) {
                                         // filtro dos blocos SINTETIZADOS pelo servidor Z.ai: o banner
                                         // "**<globo> Z.ai Built-in Tool**" e o dump "**Output:** **web_search_prime
                                         // _result_summary:** [{...}" — nao vai pro card nem pro historico
                                         string sofar = blk.Text.ToString();
-                                        if (!sofar.StartsWith("*")) { blk.Live = true; Emit("delta", sofar); }
+                                        if (!sofar.StartsWith("*")) { blk.Live = true; if (_subDepth == 0) Emit("delta", sofar); }
                                         else if (sofar.Length >= 24) {
                                             if (SrvTrace(sofar)) blk.Trace = true;
-                                            else { blk.Live = true; Emit("delta", sofar); }
+                                            else { blk.Live = true; if (_subDepth == 0) Emit("delta", sofar); }
                                         }
                                     }
                                 }
@@ -1387,6 +1519,17 @@ public class Engine {
     string LocalTool(string name, Dictionary<string, object> inp, CancellationToken ct) {
         string p = H.S(inp, "path");
         try {
+            if (name == "skill_read") {   // Onda 5: carrega o corpo da skill (leitura livre)
+                string sn = H.S(inp, "name");
+                if (string.IsNullOrEmpty(sn)) return "ERRO: informe 'name' (o nome da skill listado no system).";
+                foreach (string[] sk in _skills) if (sk[0] == sn) {
+                    string t = File.ReadAllText(sk[1]);
+                    return "SKILL " + sn + " (" + sk[1] + ") — siga estas instruções:\n" + (t.Length > 8000 ? t.Substring(0, 8000) + "\n…(truncado)" : t);
+                }
+                var skNames = new StringBuilder();
+                foreach (string[] sk in _skills) { if (skNames.Length > 0) skNames.Append(", "); skNames.Append(sk[0]); }
+                return "ERRO: skill desconhecida '" + sn + "'. Disponíveis: " + skNames;
+            }
             if (name == "file_list") {
                 string dir = string.IsNullOrEmpty(p) ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : p;
                 if (!Directory.Exists(dir)) return "ERRO: pasta não encontrada: " + dir;
@@ -1741,7 +1884,7 @@ public class Engine {
                 sb.Append(SourceJson(f[0], f[1]));
                 if (++n >= 6) break;
             }
-            if (n > 0) Emit("sources", "[" + sb.ToString() + "]");
+            if (n > 0 && _subDepth == 0) Emit("sources", "[" + sb.ToString() + "]");
         } catch { }
     }
     static void Collect(object o, List<string[]> found) {
@@ -1851,6 +1994,15 @@ function New-EngineFromProfile {
         [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue, [bool]$cfg.promptCache)
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
     $eng.MemPath = $memFile
+    # Onda 5: skills .md ao lado do app — lista {name,file} entregue ao engine
+    # (skill_read so' entra nas tools quando existir pelo menos uma)
+    $skillList = Get-SkillList
+    if ($skillList -and $skillList.Count -gt 0) {
+        try {
+            $sj2 = ConvertTo-Json -InputObject (@($skillList | ForEach-Object { @{ name = $_[0]; file = $_[1] } })) -Compress
+            $eng.SetSkills($sj2)
+        } catch { Log "skills-config: $_" }
+    }
     if ($cfg.mcpServers) {
         # Onda 4: servidores MCP sobem no 1o turno (McpInit) — aqui so' entrega o config
         try { $eng.SetMcpConfig(($cfg.mcpServers | ConvertTo-Json -Depth 6 -Compress)) } catch { Log "mcp-config: $_" }
@@ -1908,6 +2060,8 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "Antes de executar 3+ ações que ALTERAM arquivos ou o sistema (criar/editar/mover/apagar, comandos), PROponha com plan {title, steps[]}: o usuário aprova UMA vez e as ações rodam sem confirmação individual; se rejeitar, nada executa — replique o plano ajustado ou pergunte. " +
      "Ao mexer com arquivos, confirme os caminhos com file_list antes. " +
      "Tools com prefixo mcp_ vêm de servidores externos (MCP) configurados pelo usuário — use-as como usaria as built-in quando fizer sentido. " +
+     "A tool research dispara um SUBAGENTE de leitura com contexto próprio (ele NÃO vê esta conversa) para investigações amplas — muitos arquivos/pastas ou buscas repetidas: passe uma tarefa autocontida e use o relatório que voltar; para uma leitura/busca única use file_read/web_search direto. " +
+     "Quando houver skills listadas no fim deste prompt, são playbooks do usuário: se a tarefa combinar com uma, carregue-a com skill_read ANTES de responder e siga as instruções. " +
      "Formatação leve: negrito e listas simples quando ajudar, nada de títulos grandes.")
 }
 
@@ -2449,7 +2603,7 @@ function Send-Current {
     $script:curQuestion = $text
     # system prompt = base + memoria (lida a CADA envio: fato salvo nesta conversa ja
     # vale para o proximo envio, e o arquvivo e' editavel a mao)
-    $script:engine.Ask($text, $imgs, $txtFiles, $pdfs, ($sysPrompt + (Get-MemoryBlock)))
+    $script:engine.Ask($text, $imgs, $txtFiles, $pdfs, ($sysPrompt + (Get-MemoryBlock) + (Get-SkillsBlock)))
 }
 
 function New-Conversation {
@@ -2710,7 +2864,7 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; Update-LiveAnswer }
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭') { Log ('tool: ' + $m.Text) } }
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖') { Log ('tool: ' + $m.Text) } }
             'sources' { Show-Sources $m.Text }
             'plan' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
