@@ -12,3 +12,7 @@ kit/zquick.ps1
 # sobras de teste / log
 teste-arquivo.txt
 *.log
+
+# memoria do usuario (fatos duraveis gravados pelo propio app) + backups de edicao
+zquick-memory.md
+*.zquick.bak

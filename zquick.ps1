@@ -30,12 +30,13 @@ $cfg = @{
     profile       = 'zai'
     model         = 'auto'
     hotkey        = 'win+c'
-    maxTokens     = 2048
+    maxTokens     = 4096
     searchEngine  = 'bing'
     hideOnBlur    = $false
     systemPrompt  = $null
     windowOpacity = 1.0
     theme         = $null
+    allow         = @{ runPs = @(); paths = @() }   # "sempre permitir": comandos exatos + pastas liberadas
     profiles      = @{
         zai = @{
             label    = 'Z.ai GLM'
@@ -56,6 +57,12 @@ function Reload-Config {
         }
         if ($j.theme) { $cfg.theme = $j.theme }
         if ($j.profiles) { $cfg.profiles = $j.profiles }
+        if ($j.allow) {
+            $a = @{ runPs = @(); paths = @() }
+            if ($j.allow.runPs)   { $a.runPs   = @($j.allow.runPs   | ForEach-Object { [string]$_ }) }
+            if ($j.allow.paths)   { $a.paths   = @($j.allow.paths   | ForEach-Object { [string]$_ }) }
+            $cfg.allow = $a
+        }
     } catch { Log "config invalido, usando defaults: $_" }
 }
 Reload-Config
@@ -89,7 +96,7 @@ function Save-Config {
             profile = $cfg.profile; model = $cfg.model; hotkey = $cfg.hotkey; maxTokens = $cfg.maxTokens
             searchEngine = $cfg.searchEngine; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity
-            theme = $cfg.theme; profiles = $cfg.profiles
+            theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow
         }
         [pscustomobject]$out | ConvertTo-Json -Depth 6 | Set-Content -Path $cfgPath -Encoding utf8
     } catch { Log "save-config: $_" }
@@ -107,6 +114,18 @@ function Resolve-ProfileAuth($p) {
     }
     if (-not $key) { throw "sem API key: defina 'apiKey' no perfil do zquick.json" }
     @{ base = [string]$base; key = [string]$key }
+}
+
+# ---------- memoria entre conversas (zquick-memory.md ao lado do app) ----------
+$memFile = Join-Path $appDir 'zquick-memory.md'
+function Get-MemoryBlock {
+    try {
+        if (-not (Test-Path -LiteralPath $memFile)) { return '' }
+        $t = [IO.File]::ReadAllText($memFile)
+        if (-not $t.Trim()) { return '' }
+        if ($t.Length -gt 6000) { $t = '…(memória antiga descartada)' + $t.Substring($t.Length - 6000) }
+        return "`n`n## Memória — fatos duráveis do usuário (aprendidos em conversas anteriores; use quando relevante)`n$t"
+    } catch { return '' }
 }
 
 # ---------- engine C# (rede, SSE, agente, busca) — C#5/.NET Framework 4.x compativel ----------
@@ -255,7 +274,7 @@ public static class Hook {
 }
 
 public class UiMsg {
-    public string Type;   // delta | status | sources | confirm | ask | stopped | done | error | note
+    public string Type;   // delta | status | sources | confirm | ask | stopped | done | error | note | allow
     public string Text;
 }
 
@@ -269,6 +288,10 @@ public class Engine {
     string _specInject;   // resultados da pre-busca (round 0 apenas; nao entra no historico salvo)
     string _pdfFallback;  // msg do usuario SEM os PDFs (retry se o endpoint rejeitar document blocks)
     public string PsExe;  // powershell p/ tool run_ps (default powershell.exe)
+    public string MemPath; // zquick-memory.md — memoria entre conversas (PS seta; null = desativado)
+    readonly List<string> _allowRunPs = new List<string>();   // "sempre permitir": comando exato
+    readonly List<string> _allowPaths = new List<string>();   // "sempre permitir": pasta liberada
+    string _confTool, _confSubject;   // subject da confirmacao em curso (p/ gravar a regra no "sempre")
     int _confirmId; readonly ManualResetEventSlim _confEv = new ManualResetEventSlim(false); bool _confOk;
     int _askId; readonly ManualResetEventSlim _askEv = new ManualResetEventSlim(false); string _askAnswer;
     bool _compactAsked;   // pergunta de compactacao da conversa: 1x por conversa
@@ -334,6 +357,45 @@ public class Engine {
     public void Reset() { lock (_sync) { _history.Clear(); _compactAsked = false; try { _cts.Cancel(); } catch {} } }
     public void Cancel() { lock (_sync) { try { _cts.Cancel(); } catch {} } }
 
+    // ---------- "sempre permitir" (regras persistidas no zquick.json pela UI) ----------
+    public void SetAllowRules(string[] runPs, string[] paths) {
+        lock (_sync) {
+            _allowRunPs.Clear(); _allowPaths.Clear();
+            if (runPs != null) foreach (string s in runPs) if (!string.IsNullOrEmpty(s)) _allowRunPs.Add(s.Trim());
+            if (paths != null) foreach (string s in paths) if (!string.IsNullOrEmpty(s)) _allowPaths.Add(s.TrimEnd('\\').ToLowerInvariant());
+        }
+    }
+
+    bool ShouldAutoApprove(string tool, string subject) {
+        if (string.IsNullOrEmpty(tool) || string.IsNullOrEmpty(subject)) return false;
+        lock (_sync) {
+            if (tool == "run_ps") {
+                string s = subject.Trim();
+                foreach (string r in _allowRunPs) if (string.Equals(r, s, StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
+            string p = subject.TrimEnd('\\').ToLowerInvariant();
+            foreach (string r in _allowPaths) if (p.StartsWith(r, StringComparison.Ordinal)) return true;   // pasta liberada
+            return false;
+        }
+    }
+
+    // "✔ Sempre": aprova a atual e registra a regra (UiMsg 'allow' -> UI persiste no json)
+    public void ConfirmAlways(int id) {
+        string tool, subject;
+        lock (_sync) {
+            if (id != _confirmId) return;
+            tool = _confTool; subject = _confSubject;
+            _confOk = true; _confEv.Set();
+        }
+        if (string.IsNullOrEmpty(tool) || string.IsNullOrEmpty(subject)) return;
+        lock (_sync) {
+            if (tool == "run_ps") { if (!_allowRunPs.Contains(subject)) _allowRunPs.Add(subject); }
+            else { string p = subject.TrimEnd('\\').ToLowerInvariant(); if (!_allowPaths.Contains(p)) _allowPaths.Add(p); }
+        }
+        Emit("allow", "{\"tool\":" + J(tool) + ",\"subject\":" + J(subject) + "}");
+    }
+
     // historico de conversa (snapshots brutos do _history) p/ salvar/retomar
     public List<string> GetHistory() { lock (_sync) { return new List<string>(_history); } }
     public void SetHistory(List<string> msgs) { lock (_sync) { if (_busy == 1) return; _history.Clear(); _compactAsked = false; if (msgs != null) _history.AddRange(msgs); } }
@@ -357,10 +419,18 @@ public class Engine {
         lock (_sync) { if (id != _confirmId) return; _confOk = ok; _confEv.Set(); }
     }
 
-    bool GateConfirm(string title, string detail, CancellationToken ct) {
+    bool GateConfirm(string tool, string subject, string title, string detail, string diffJson, CancellationToken ct) {
+        if (ShouldAutoApprove(tool, subject)) { Emit("status", "✅ sempre permitido: " + Trunc(subject, 60)); return true; }
         int id;
-        lock (_sync) { _confirmId++; id = _confirmId; _confOk = false; _confEv.Reset(); }
-        Emit("confirm", "{\"id\":" + id + ",\"title\":" + J(title) + ",\"detail\":" + J(detail) + "}");
+        lock (_sync) { _confirmId++; id = _confirmId; _confOk = false; _confEv.Reset(); _confTool = tool; _confSubject = subject; }
+        var sb = new StringBuilder();
+        sb.Append("{\"id\":").Append(id)
+          .Append(",\"title\":").Append(J(title))
+          .Append(",\"detail\":").Append(J(detail));
+        if (diffJson != null) sb.Append(",\"diff\":").Append(diffJson);
+        if (!string.IsNullOrEmpty(tool)) sb.Append(",\"tool\":").Append(J(tool)).Append(",\"subject\":").Append(J(subject));
+        sb.Append("}");
+        Emit("confirm", sb.ToString());
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (true) {
             if (ct.IsCancellationRequested) break;
@@ -514,6 +584,23 @@ public class Engine {
         return false;
     }
 
+    // heuristica: pedido de GERACAO LONGA -> sobe pro modelo grande direto. O flash
+    // devolve [thinking, text] e o thinking consome o maxTokens — ensaio/lista longa
+    // pode sair curto ou vazio. No big o orcamento rende (maxTokens 4096).
+    static readonly string[] LongKeys = new string[] {
+        "escreva","escrever","redija","redigir","elabore","ensaio","artigo","redação","redacao",
+        "conto","crônica","cronica","história","historia","poema","roteiro","e-mail","email","carta",
+        "relatório","relatorio","documentaç","documentac","tabuada","resumo detalhad","detalhad",
+        "texto longo","lista completa","vários parágrafos","varios paragrafos"
+    };
+    static readonly Regex RxLen = new Regex("\\d+\\s*(palavras|parágrafos|paragrafos|p[áa]ginas|linhas|itens|perguntas|tópicos|topicos)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static bool LooksLongForm(string s) {
+        if (string.IsNullOrEmpty(s)) return false;
+        string low = s.ToLowerInvariant();
+        foreach (string k in LongKeys) if (low.Contains(k)) return true;
+        return RxLen.IsMatch(s);
+    }
+
     void Run(object arg) {
         object[] a = (object[])arg;
         string userText = (string)a[0]; List<string> imgB64 = (List<string>)a[1]; string sys = (string)a[2];
@@ -528,6 +615,13 @@ public class Engine {
                 // inline e sai "procurando" o arquivo no disco (10x file_list, resposta
                 // vazia). PDF fica no flash — document block provado la (E2E fase 4).
                 if (_auto && !_useVision && txtFiles != null && txtFiles.Count > 0) _useBig = true;
+                // pedido de geracao longa (ensaio, artigo, lista grande) -> direto pro
+                // modelo grande: no flash o bloco thinking come o maxTokens e o texto
+                // sai curto/vasio sem nenhum erro (pedido do usuario 13/10).
+                if (_auto && !_useVision && LooksLongForm(userText)) {
+                    _useBig = true;
+                    Emit("status", "↗ geração longa — usando " + _big);
+                }
             }
             // conversa crescendo: PERGUNTA se compacta (resumo) antes de bater no teto duro
             bool askCompact = false; int msgN = 0; double kb = 0;
@@ -538,8 +632,8 @@ public class Engine {
                     _compactAsked = true; askCompact = true; msgN = _history.Count; kb = chars / 1024;
                 }
             }
-            if (askCompact && GateConfirm("Compactar conversa",
-                string.Format("{0} mensagens • {1:0} KB. Posso resumir as trocas antigas (mantendo as últimas intactas) para a conversa continuar leve?", msgN, kb), ct))
+            if (askCompact && GateConfirm(null, null, "Compactar conversa",
+                string.Format("{0} mensagens • {1:0} KB. Posso resumir as trocas antigas (mantendo as últimas intactas) para a conversa continuar leve?", msgN, kb), null, ct))
                 CompactHistory(ct);
             var ub = new StringBuilder();
             var ubNoPdf = new StringBuilder();
@@ -631,8 +725,8 @@ public class Engine {
                     string outp = ""; string q = null; string u = null;
                     Dictionary<string, object> inp = MJ.Parse(b.Input.Length > 0 ? b.Input.ToString() : "{}") as Dictionary<string, object>;
                     if (inp != null) { q = H.S(inp, "query"); u = H.S(inp, "url"); }
-                    if (b.Name == "file_list" || b.Name == "file_read" || b.Name == "file_grep" || b.Name == "file_write" || b.Name == "file_move" ||
-                        b.Name == "file_delete" || b.Name == "note_add" || b.Name == "run_ps") {
+                    if (b.Name == "file_list" || b.Name == "file_read" || b.Name == "file_grep" || b.Name == "file_edit" || b.Name == "file_write" || b.Name == "file_move" ||
+                        b.Name == "file_delete" || b.Name == "note_add" || b.Name == "memory_save" || b.Name == "run_ps") {
                         Emit("status", "⚙ " + b.Name + "…");
                         outp = LocalTool(b.Name, inp, ct);
                     }
@@ -670,10 +764,12 @@ public class Engine {
          .Append(",{\"name\":\"file_list\",\"description\":\"List files and folders of a directory on the user's Windows.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute directory path (empty = user home)\"}}}}")
          .Append(",{\"name\":\"file_read\",\"description\":\"Read a text file from the user's Windows (first 8000 chars).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"}},\"required\":[\"path\"]}}")
          .Append(",{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (content search, recursive): returns the matching lines as file:line: text. Use it to find where a term/name/config is defined or used — far cheaper than reading files one by one.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"text or regular expression to find in file contents\"},\"path\":{\"type\":\"string\",\"description\":\"absolute folder path to search in (empty = user home)\"},\"glob\":{\"type\":\"string\",\"description\":\"filename filter like *.ps1 or *.txt (empty = all files)\"}},\"required\":[\"pattern\"]}}")
-         .Append(",{\"name\":\"file_write\",\"description\":\"Create or overwrite a text file (any extension). Requires the user's approval in the app window. If the file already exists, the previous version is kept as <file>.zquick.bak.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}")
+         .Append(",{\"name\":\"file_edit\",\"description\":\"Surgically replace one exact text snippet inside an existing file (find & replace; the user approves a red/green diff). old_str must match the file EXACTLY, including indentation and line breaks — include surrounding lines to make it unique, or set replace_all:true. new_str empty deletes the snippet. ALWAYS prefer this over file_write for changing an existing file. Previous version kept as <file>.zquick.bak.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"old_str\":{\"type\":\"string\",\"description\":\"exact text to replace, copied from file_read (indentation counts)\"},\"new_str\":{\"type\":\"string\",\"description\":\"replacement text (empty string = delete old_str)\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"true = replace every occurrence of old_str\"}},\"required\":[\"path\",\"old_str\",\"new_str\"]}}")
+         .Append(",{\"name\":\"file_write\",\"description\":\"Create or overwrite a whole text file (any extension). For CHANGING an existing file prefer file_edit (surgical, cheaper, shows a diff). Requires the user's approval; previous version kept as <file>.zquick.bak; result verified by re-reading.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}")
          .Append(",{\"name\":\"file_move\",\"description\":\"Move or RENAME a file or folder. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\",\"description\":\"absolute source path\"},\"dest\":{\"type\":\"string\",\"description\":\"absolute destination path (full new name)\"}},\"required\":[\"src\",\"dest\"]}}")
          .Append(",{\"name\":\"file_delete\",\"description\":\"Send a file or folder to the Recycle Bin. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute path\"}},\"required\":[\"path\"]}}")
          .Append(",{\"name\":\"note_add\",\"description\":\"Save a markdown note to the user's notes folder (Documents/ZQuick-Notas). Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\",\"description\":\"markdown body\"}},\"required\":[\"title\",\"content\"]}}")
+         .Append(",{\"name\":\"memory_save\",\"description\":\"Save ONE durable fact about the user, their machines, servers, paths or preferences to the persistent memory, loaded into EVERY future conversation. Use for things you would otherwise need to ask again (e.g. 'meu servidor de planilhas é 192.168.0.99', 'prefiro respostas curtas'). Do NOT save conversation-specific content. Runs without approval.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\",\"description\":\"the fact, 1-2 sentences in Portuguese, self-contained\"}},\"required\":[\"fact\"]}}")
          .Append(",{\"name\":\"run_ps\",\"description\":\"Run ANY PowerShell command on the user's Windows (open apps, system settings, processes, checks...). ALWAYS shown to the user for approval before running. Do NOT delete user files with this (use file_delete). Keep commands short and idempotent.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"PowerShell command line\"}},\"required\":[\"command\"]}}")
          .Append(",{\"name\":\"ask_user\",\"description\":\"Ask the user ONE multiple-choice question and wait for their pick. Use when the task has ambiguity or a decision the user should make (which approach, which file, scope, taste, a risky trade-off). Do NOT use it for anything you can decide yourself or verify with file_list/web_search, and never ask the same question twice. 2-4 options, each with a short label (1-5 words) and a description of what it implies; the user can always answer free text instead.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"the complete question in Portuguese, specific, ending with ?\"},\"header\":{\"type\":\"string\",\"description\":\"short chip label, max ~12 chars\"},\"multiSelect\":{\"type\":\"boolean\",\"description\":\"true = the user may pick several options\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"description\":\"concise option, 1-5 words\"},\"description\":{\"type\":\"string\",\"description\":\"what choosing this implies\"}},\"required\":[\"label\"]}}},\"required\":[\"question\",\"options\"]}}");
         if (_auto && !_useBig && !_useVision) // vision-routed nao oferece escalate: o big nao enxerga
@@ -708,41 +804,52 @@ public class Engine {
             using (Stream st = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
             using (StreamReader sr = new StreamReader(st, Encoding.UTF8)) {
                 string line;
-                while ((line = sr.ReadLine()) != null) {
-                    if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
-                    if (!line.StartsWith("data:")) continue;
-                    string data = line.Substring(5).TrimStart();
-                    if (data == "[DONE]") break;
-                    Dictionary<string, object> root = MJ.Parse(data) as Dictionary<string, object>;
-                    if (root == null) continue;
-                    string typ = H.S(root, "type");
-                    if (typ == "content_block_start") {
-                        int idx = (int)H.N(root, "index");
-                        Dictionary<string, object> cb = H.O(root, "content_block");
-                        string k = H.S(cb, "type");
-                        Blk blk = new Blk(); blk.Kind = k;
-                        if (k == "tool_use") { blk.Id = H.S(cb, "id"); blk.Name = H.S(cb, "name"); }
-                        blocks[idx] = blk;
-                    } else if (typ == "content_block_delta") {
-                        int idx = (int)H.N(root, "index");
-                        Blk blk;
-                        if (!blocks.TryGetValue(idx, out blk)) continue;
-                        Dictionary<string, object> del = H.O(root, "delta");
-                        string dk = H.S(del, "type");
-                        if (dk == "text_delta") {
-                            string tx = H.S(del, "text"); if (tx == null) tx = "";
-                            if (ttft < 0) { ttft = swt.Elapsed.TotalSeconds; Emit("note", string.Format("1º token em {0:0.0}s", ttft)); }
-                            streamed = true;
-                            blk.Text.Append(tx); Emit("delta", tx);
-                        } else if (dk == "input_json_delta") {
-                            string pj = H.S(del, "partial_json"); if (pj != null) blk.Input.Append(pj);
+                // watchdog: stream calado (nenhuma linha em 120s) derruba a conexao —
+                // sem isto um SSE morto deixa o turno pendurado para sempre (HttpClient
+                // .Timeout nao cobre a leitura do body depois dos headers)
+                bool stalled = false;
+                var stall = new Timer(delegate { stalled = true; try { resp.Dispose(); } catch {} }, null, TimeSpan.FromSeconds(120), TimeSpan.FromMilliseconds(-1));
+                try {
+                    while ((line = sr.ReadLine()) != null) {
+                        try { stall.Change(TimeSpan.FromSeconds(120), TimeSpan.FromMilliseconds(-1)); } catch {}
+                        if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                        if (!line.StartsWith("data:")) continue;
+                        string data = line.Substring(5).TrimStart();
+                        if (data == "[DONE]") break;
+                        Dictionary<string, object> root = MJ.Parse(data) as Dictionary<string, object>;
+                        if (root == null) continue;
+                        string typ = H.S(root, "type");
+                        if (typ == "content_block_start") {
+                            int idx = (int)H.N(root, "index");
+                            Dictionary<string, object> cb = H.O(root, "content_block");
+                            string k = H.S(cb, "type");
+                            Blk blk = new Blk(); blk.Kind = k;
+                            if (k == "tool_use") { blk.Id = H.S(cb, "id"); blk.Name = H.S(cb, "name"); }
+                            blocks[idx] = blk;
+                        } else if (typ == "content_block_delta") {
+                            int idx = (int)H.N(root, "index");
+                            Blk blk;
+                            if (!blocks.TryGetValue(idx, out blk)) continue;
+                            Dictionary<string, object> del = H.O(root, "delta");
+                            string dk = H.S(del, "type");
+                            if (dk == "text_delta") {
+                                string tx = H.S(del, "text"); if (tx == null) tx = "";
+                                if (ttft < 0) { ttft = swt.Elapsed.TotalSeconds; Emit("note", string.Format("1º token em {0:0.0}s", ttft)); }
+                                streamed = true;
+                                blk.Text.Append(tx); Emit("delta", tx);
+                            } else if (dk == "input_json_delta") {
+                                string pj = H.S(del, "partial_json"); if (pj != null) blk.Input.Append(pj);
+                            }
+                        } else if (typ == "message_delta") {
+                            Dictionary<string, object> md = H.O(root, "delta");
+                            string srn = md == null ? null : H.S(md, "stop_reason");
+                            if (srn != null) stop = srn;
                         }
-                    } else if (typ == "message_delta") {
-                        Dictionary<string, object> md = H.O(root, "delta");
-                        string srn = md == null ? null : H.S(md, "stop_reason");
-                        if (srn != null) stop = srn;
                     }
-                }
+                } catch (Exception) {
+                    if (stalled && !ct.IsCancellationRequested) throw new Exception("stream parado 120s sem dados — interrompido (o texto que já chegou ficou na resposta)");
+                    throw;
+                } finally { try { stall.Dispose(); } catch {} }
             }
         }
         var list = new List<Blk>();
@@ -928,30 +1035,57 @@ public class Engine {
                     + (matches >= 50 ? " (limite 50)" : "") + (files >= 400 ? " (limite 400 arquivos)" : "")
                     + (swG.Elapsed.TotalSeconds > 8 ? " (parou por tempo)" : "") + ":\n" + sbG.ToString();
             }
+            if (name == "file_edit") {
+                string path = H.S(inp, "path");
+                string oldStr = H.S(inp, "old_str"); string newStr = H.S(inp, "new_str");
+                object rav; bool replAll = inp != null && inp.TryGetValue("replace_all", out rav) && rav is bool && (bool)rav;
+                if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(oldStr)) return "ERRO: informe 'path' e 'old_str' exato (copie do file_read, com indentação; new_str vazio = apagar o trecho).";
+                if (!File.Exists(path)) return "ERRO: arquivo não encontrado: " + path;
+                string t = File.ReadAllText(path);
+                if (t.Length > 2000000) return "ERRO: arquivo grande demais para edição (2 MB).";
+                int n = CountOcc(t, oldStr);
+                if (n == 0) return "ERRO: old_str não encontrado no arquivo. Copie o trecho EXATO com file_read (indentação conta) ou localize com file_grep.";
+                if (n > 1 && !replAll) return "ERRO: old_str aparece " + n + "× no arquivo. Inclua linhas de contexto ao redor para ficar único, ou envie \"replace_all\":true.";
+                int first = t.IndexOf(oldStr, StringComparison.Ordinal);
+                int line = 1; for (int i = 0; i < first; i++) if (t[i] == '\n') line++;
+                string full = Path.GetFullPath(path);
+                string summ = full + " — " + (replAll ? n + " substituição(ões)" : "1 substituição") + " (linha " + line + ")";
+                if (!GateConfirm("file_edit", full, "Editar arquivo", summ, DiffJson(oldStr, newStr), ct)) return "NEGADO pelo usuário.";
+                bool bak = false;
+                try { if (File.Exists(full)) { File.Copy(full, full + ".zquick.bak", true); bak = true; } } catch { }
+                string nt = replAll ? t.Replace(oldStr, newStr ?? "")
+                    : t.Substring(0, first) + (newStr ?? "") + t.Substring(first + oldStr.Length);
+                File.WriteAllText(full, nt, new UTF8Encoding(false));
+                string chk = File.ReadAllText(full);
+                string verify = (string.IsNullOrEmpty(newStr) || chk.Contains(newStr)) ? "verificado na re-leitura" : "ATENÇÃO: new_str ausente na re-leitura";
+                bool oldGone = !chk.Contains(oldStr) || (newStr != null && newStr.Contains(oldStr));
+                return "OK — editado: " + summ + (bak ? " • backup .zquick.bak" : "") + " • " + verify + (oldGone ? "" : " • old_str ainda presente (estava dentro de new_str?)");
+            }
             if (name == "file_write") {
                 string path = H.S(inp, "path"); string content = H.S(inp, "content") ?? "";
                 if (string.IsNullOrEmpty(path)) return "ERRO: path obrigatório";
-                if (!GateConfirm("Gravar arquivo", path + "\n(" + content.Length + " caracteres)", ct)) return "NEGADO pelo usuário.";
                 string full = Path.GetFullPath(path);
+                if (!GateConfirm("file_write", full, "Gravar arquivo", full + "\n(" + content.Length + " caracteres)", null, ct)) return "NEGADO pelo usuário.";
                 string d = Path.GetDirectoryName(full);
                 if (!Directory.Exists(d)) Directory.CreateDirectory(d);
                 bool bak = false;
                 try { if (File.Exists(full)) { File.Copy(full, full + ".zquick.bak", true); bak = true; } } catch { }
                 File.WriteAllText(full, content, new UTF8Encoding(false));
-                return "OK — gravado: " + full + (bak ? " (versão anterior em " + Path.GetFileName(full) + ".zquick.bak)" : "");
+                string verify = File.ReadAllText(full) == content ? "verificado na re-leitura" : "ATENÇÃO: re-leitura difere do enviado";
+                return "OK — gravado: " + full + (bak ? " (versão anterior em " + Path.GetFileName(full) + ".zquick.bak)" : "") + " • " + verify;
             }
             if (name == "file_move") {
                 string src = H.S(inp, "src"), dest = H.S(inp, "dest");
                 if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dest)) return "ERRO: src e dest obrigatórios";
                 if (!File.Exists(src) && !Directory.Exists(src)) return "ERRO: não encontrado: " + src;
                 if (File.Exists(dest) || Directory.Exists(dest)) return "ERRO: destino já existe: " + dest;
-                if (!GateConfirm("Mover / renomear", src + "\n→ " + dest, ct)) return "NEGADO pelo usuário.";
+                if (!GateConfirm("file_move", Path.GetDirectoryName(Path.GetFullPath(dest)), "Mover / renomear", src + "\n→ " + dest, null, ct)) return "NEGADO pelo usuário.";
                 if (Directory.Exists(src)) Directory.Move(src, dest); else File.Move(src, dest);
                 return "OK — movido/renomeado para " + dest;
             }
             if (name == "file_delete") {
                 if (string.IsNullOrEmpty(p) || (!File.Exists(p) && !Directory.Exists(p))) return "ERRO: não encontrado: " + p;
-                if (!GateConfirm("Apagar (vai para a Lixeira)", p, ct)) return "NEGADO pelo usuário.";
+                if (!GateConfirm("file_delete", Path.GetFullPath(p), "Apagar (vai para a Lixeira)", p, null, ct)) return "NEGADO pelo usuário.";
                 int rc = Recycle.ToRecycleBin(p);
                 return rc == 0 ? "OK — enviado para a Lixeira: " + p : "ERRO: falha ao enviar para a Lixeira (código " + rc + ")";
             }
@@ -964,10 +1098,23 @@ public class Engine {
                 File.WriteAllText(fp, "# " + title + "\n\n_" + DateTime.Now.ToString("dd/MM/yyyy HH:mm") + " — via ZQuick_\n\n" + content + "\n", new UTF8Encoding(false));
                 return "OK — nota salva: " + fp;
             }
+            if (name == "memory_save") {
+                string fact = H.S(inp, "fact");
+                if (string.IsNullOrEmpty(fact)) return "ERRO: informe 'fact' (o fato durável, 1-2 frases).";
+                if (string.IsNullOrEmpty(MemPath)) return "ERRO: memória não configurada.";
+                string one = "- " + Regex.Replace(fact.Trim(), "\\s+", " ") + " _(" + DateTime.Now.ToString("dd/MM/yy") + ")_";
+                var keep = new List<string>();
+                if (File.Exists(MemPath)) foreach (string l in File.ReadAllLines(MemPath)) if (l.Trim().Length > 0) keep.Add(l.TrimEnd('\r'));
+                foreach (string l in keep) if (l.Contains(fact)) return "OK — já estava na memória: " + Trunc(fact, 120);
+                keep.Add(one);
+                if (keep.Count > 150) keep.RemoveRange(0, keep.Count - 150);
+                File.WriteAllText(MemPath, string.Join("\n", keep.ToArray()) + "\n", new UTF8Encoding(false));
+                return "OK — memorizado para as próximas conversas: " + Trunc(fact, 120);
+            }
             if (name == "run_ps") {
                 string cmd = H.S(inp, "command");
                 if (string.IsNullOrEmpty(cmd)) return "ERRO: command obrigatório";
-                if (!GateConfirm("Comando PowerShell", cmd, ct)) return "NEGADO pelo usuário.";
+                if (!GateConfirm("run_ps", cmd, "Comando PowerShell", cmd, null, ct)) return "NEGADO pelo usuário.";
                 return RunPs(cmd);
             }
             return "unknown tool";
@@ -983,6 +1130,22 @@ public class Engine {
         string r = sb.ToString().Trim('-');
         if (r.Length > 50) r = r.Substring(0, 50);
         return r.Length > 0 ? r : "nota";
+    }
+
+    static int CountOcc(string s, string sub) {
+        if (string.IsNullOrEmpty(s) || string.IsNullOrEmpty(sub)) return 0;
+        int n = 0, i = 0;
+        while ((i = s.IndexOf(sub, i, StringComparison.Ordinal)) >= 0) { n++; i += sub.Length; }
+        return n;
+    }
+
+    // diff vermelho/verde p/ a ConfirmBar: linhas de old_str com "- ", de new_str com "+ "
+    static string DiffJson(string oldStr, string newStr) {
+        var dj = new StringBuilder(); int cap = 0;
+        foreach (string ln in oldStr.Split('\n')) { if (cap++ >= 80) break; if (dj.Length > 0) dj.Append(","); dj.Append("{\"s\":").Append(J("- " + ln.TrimEnd('\r'))).Append("}"); }
+        if (!string.IsNullOrEmpty(newStr)) foreach (string ln in newStr.Split('\n')) { if (cap++ >= 80) break; if (dj.Length > 0) dj.Append(","); dj.Append("{\"s\":").Append(J("+ " + ln.TrimEnd('\r'))).Append("}"); }
+        if (cap >= 80) dj.Append(",{\"s\":\"…(diff truncado)\"}");
+        return "[" + dj.ToString() + "]";
     }
 
     string RunPs(string cmd) {
@@ -1083,6 +1246,10 @@ function New-EngineFromProfile {
         [string]$p.fastModel, [string]$p.bigModel,
         [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue)
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
+    $eng.MemPath = $memFile
+    $rules = @{ runPs = @(); paths = @() }
+    if ($cfg.allow) { $rules = $cfg.allow }
+    $eng.SetAllowRules([string[]]$rules.runPs, [string[]]$rules.paths)
     # run_ps executa num powershell de verdade: pwsh quando o app roda em pwsh,
     # powershell.exe quando roda como exe PS2EXE (5.1)
     try { $pe = (Get-Process -Id $PID).Path } catch { $pe = $null }
@@ -1120,8 +1287,11 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "Arquivo anexado (PDF, DOCX, texto/código) chega DENTRO da mensagem — responda pelo conteúdo anexado, sem procurar no disco. " +
      "Você também pode AGIR no Windows do usuário: file_list/file_read (leitura, sem confirmação), " +
      "file_grep (busca de CONTEÚDO dentro dos arquivos de uma pasta, recursiva — quando quiser achar onde algo está definido ou usado, prefira file_grep a ler arquivo por arquivo), " +
-     "file_write/file_move/file_delete (alteram algo — o usuário autoriza cada uma na janela; apagar vai para a Lixeira), " +
-     "note_add (grava nota em Documentos\\ZQuick-Notas, sem confirmação) e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; " +
+     "file_edit (edição cirúrgica troca-por-troca com diff para o usuário aprovar — para alterar arquivo existente, SEMPRE prefira file_edit a regravar com file_write), " +
+     "file_write (cria/sobrescreve arquivo inteiro)/file_move/file_delete (alteram algo — o usuário autoriza cada uma na janela; apagar vai para a Lixeira), " +
+     "note_add (grava nota em Documentos\\ZQuick-Notas, sem confirmação), " +
+     "memory_save (grava fato DURÁVEL sobre o usuário/suas máquinas/preferências — vale para as próximas conversas; use quando aprender algo que vai precisar de novo e não for específico da conversa atual) " +
+     "e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; " +
      "NUNCA apague arquivos do usuário com run_ps, use file_delete). Se o usuário negar, informe e não repita a mesma ação. " +
      "Quando a tarefa tiver ambiguidade ou decisão que cabe ao usuário (qual abordagem, qual arquivo, escopo, preferência), pergunte UMA vez com ask_user: " +
      "2-4 opções de label curto + descrição do que a escolha implica; o usuário pode responder texto livre ou cancelar. " +
@@ -1171,8 +1341,15 @@ $xamlStr = @'
             <TextBlock x:Name="ConfirmTitle" Foreground="#E8E8EC" FontWeight="SemiBold" FontSize="12"/>
             <TextBlock x:Name="ConfirmDetail" Foreground="#9A9AA5" FontSize="11" TextWrapping="Wrap"
                        FontFamily="Cascadia Mono, Consolas" Margin="0,4,0,6" MaxHeight="90"/>
+            <ScrollViewer x:Name="ConfirmDiffScroll" Visibility="Collapsed" MaxHeight="120" Margin="0,0,0,6"
+                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          Background="#16161A" BorderBrush="#3A3A44" BorderThickness="1" Padding="6,4">
+              <StackPanel x:Name="ConfirmDiff"/>
+            </ScrollViewer>
             <StackPanel Orientation="Horizontal">
               <Button x:Name="ConfirmYes" Content="✅ Executar" FontWeight="SemiBold"/>
+              <Button x:Name="ConfirmAlwaysBtn" Content="✔ Sempre" Margin="8,0,0,0"
+                      ToolTip="Executar e não perguntar mais para isto (comando exato ou pasta) — grava no zquick.json"/>
               <Button x:Name="ConfirmNo" Content="✕ Negar" Margin="8,0,0,0"/>
             </StackPanel>
           </StackPanel>
@@ -1217,7 +1394,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -1230,6 +1407,7 @@ if ($cfg.windowOpacity -and [double]$cfg.windowOpacity -gt 0 -and [double]$cfg.w
 $script:busy = $false
 $script:exiting = $false
 $script:stopped = $false     # veio 'stopped' do engine: resposta interrompida a pedido
+$script:queued = $null       # mensagem digitada durante a resposta (envia sozinha no fim do turno)
 $script:curAnswer = ''
 $script:lastAnswer = ''
 $script:pendSources = @()
@@ -1393,6 +1571,26 @@ function Finish-Turn {
     }
     Save-History
     Update-CtxMeter
+    # mensagem na fila (digitada durante a resposta): envia sozinha. Timer 1-tiro
+    # afasta a corrida com o finally do engine (busy=0) e deixa o "Pronto" respirar.
+    if ($script:queued) {
+        $qt = [System.Windows.Threading.DispatcherTimer]::new()
+        $qt.Interval = [TimeSpan]::FromMilliseconds(400)
+        $qt.Add_Tick({
+            param($s2, $e2)
+            $s2.Stop()
+            $q = $script:queued; $script:queued = $null
+            if (-not $q -or $script:busy) { return }
+            try {
+                foreach ($it in @($q.items)) { $script:attachments.Add($it); New-FileChip ([string]$it.Name) }
+                if (@($q.items).Count -gt 0) { $AttachScroll.Visibility = 'Visible' }
+                $InputBox.Text = [string]$q.text
+                Log 'fila: despachada'
+                Send-Current
+            } catch { Log "fila-dispatch: $_" }
+        })
+        $qt.Start()
+    }
 }
 
 # rodape: modelo + consumo estimado do contexto (100% = limiar de compactacao, 150k chars)
@@ -1538,7 +1736,18 @@ function Send-Current {
         elseif ($at.Kind -eq 'pdf') { $pdfs.Add(@([string]$at.Name, [string]$at.B64)) }
     }
     if (-not $text -and $imgs.Count -eq 0 -and $txtFiles.Count -eq 0 -and $pdfs.Count -eq 0) { return }
-    if ($script:busy) { $StatusText.Text = 'respondendo — ⏹ Parar interrompe'; return }
+    if ($script:busy) {
+        # fila: Enter durante a resposta guarda a mensagem (textos/arquivos, nao imagem)
+        # e envia sozinho quando o turno acaba — a UI nao fica bloqueada
+        $hasImg = @($script:attachments | Where-Object { $_.Kind -eq 'img' }).Count -gt 0
+        if ($hasImg) { $StatusText.Text = 'imagem não entra na fila — aguarde ou use ⏹ Parar'; return }
+        $script:queued = @{ text = $text; items = @($script:attachments) }
+        $InputBox.Clear()
+        $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
+        $StatusText.Text = '✉ na fila — envia sozinho quando a resposta acabar'
+        Log ('fila: +1 mensagem (' + $text.Length + ' chars)')
+        return
+    }
 
     $q = New-Card $null
     $qtxt = "❯ $text"
@@ -1568,7 +1777,9 @@ function Send-Current {
         $script:convResumed = $false
     }
     $script:curQuestion = $text
-    $script:engine.Ask($text, $imgs, $txtFiles, $pdfs, $sysPrompt)
+    # system prompt = base + memoria (lida a CADA envio: fato salvo nesta conversa ja
+    # vale para o proximo envio, e o arquvivo e' editavel a mao)
+    $script:engine.Ask($text, $imgs, $txtFiles, $pdfs, ($sysPrompt + (Get-MemoryBlock)))
 }
 
 function New-Conversation {
@@ -1577,6 +1788,7 @@ function New-Conversation {
     $script:curAnswer = ''; $script:lastAnswer = ''; $script:pendSources = @(); $script:livePanel = $null
     $script:convFile = $null
     $script:convResumed = $false
+    $script:queued = $null
     $AnswerDoc.Blocks.Clear()
     $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
     $ConfirmBar.Visibility = 'Collapsed'
@@ -1830,15 +2042,53 @@ $timer.Add_Tick({
             'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|📄|↗|⚙|❓') { Log ('tool: ' + $m.Text) } }
             'sources' { Show-Sources $m.Text }
             'confirm' {
-                try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null }
+                try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("confirm-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
                 if ($c -and $c.hide) { $ConfirmBar.Visibility = 'Collapsed' }
                 elseif ($c) {
+                  try {
                     $script:confirmId = [int]$c.id
                     $ConfirmTitle.Text = [string]$c.title
                     $ConfirmDetail.Text = [string]$c.detail
+                    # diff vermelho/verde (file_edit): linhas "- " / "+ " em mono
+                    $ConfirmDiff.Children.Clear()
+                    if ($c.diff) {
+                        $ConfirmDiffScroll.Visibility = 'Visible'
+                        foreach ($d in @($c.diff)) {
+                            $tb = [System.Windows.Controls.TextBlock]::new()
+                            $tb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
+                            $tb.FontSize = 11; $tb.TextWrapping = 'NoWrap'
+                            $s = [string]$d.s
+                            $tb.Text = $s
+                            if ($s.StartsWith('+')) { $tb.Foreground = '#7CC98A' }
+                            elseif ($s.StartsWith('-')) { $tb.Foreground = '#E5716E' }
+                            else { $tb.Foreground = $T.dim }
+                            $null = $ConfirmDiff.Children.Add($tb)
+                        }
+                    } else { $ConfirmDiffScroll.Visibility = 'Collapsed' }
+                    # "✔ Sempre" so' faz sentido p/ acao com regra gravavel (tool+subject)
+                    if ($c.tool) { $ConfirmAlwaysBtn.Visibility = 'Visible' } else { $ConfirmAlwaysBtn.Visibility = 'Collapsed' }
                     $ConfirmBar.Visibility = 'Visible'
                     Log ('confirma: ' + $c.title)
+                  } catch { Log ("confirm-ui ERRO: " + $_.Exception.Message + " @ " + $_.ScriptStackTrace) }
                 }
+            }
+            'allow' {
+                # regra de "sempre permitir" aprovada na UI -> persiste no zquick.json
+                try {
+                    $r = $m.Text | ConvertFrom-Json
+                    $a = @{ runPs = @(); paths = @() }
+                    if ($cfg.allow) { $a = @{ runPs = @($cfg.allow.runPs); paths = @($cfg.allow.paths) } }
+                    if ([string]$r.tool -eq 'run_ps') {
+                        if ($a.runPs -notcontains [string]$r.subject) { $a.runPs += [string]$r.subject }
+                    } else {
+                        $pp = ([string]$r.subject).TrimEnd('\').ToLowerInvariant()
+                        if ($a.paths -notcontains $pp) { $a.paths += $pp }
+                    }
+                    if ($a.runPs.Count -gt 50) { $a.runPs = @($a.runPs | Select-Object -Last 50) }
+                    if ($a.paths.Count -gt 50) { $a.paths = @($a.paths | Select-Object -Last 50) }
+                    $cfg.allow = $a; Save-Config
+                    Log ('sempre permitir: ' + $r.tool + ' = ' + $r.subject)
+                } catch { Log "allow: $_" }
             }
             'ask' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null }
@@ -1872,6 +2122,7 @@ function Reset-Conversation {
     if ($script:busy) { return }
     if ($script:engine) { $script:engine.Reset() }
     $script:stopped = $false
+    $script:queued = $null
     $script:curAnswer = ''; $script:lastAnswer = ''; $script:pendSources = @(); $script:livePanel = $null
     $script:convFile = $null; $script:convResumed = $false
     $AnswerDoc.Blocks.Clear()
@@ -1961,6 +2212,10 @@ $ConfirmYes.Add_Click({
 $ConfirmNo.Add_Click({
     if ($script:engine) { $script:engine.Confirm([int]$script:confirmId, $false) }
     $ConfirmBar.Visibility = 'Collapsed'; $StatusText.Text = 'ação negada'
+})
+$ConfirmAlwaysBtn.Add_Click({
+    if ($script:engine) { $script:engine.ConfirmAlways([int]$script:confirmId) }
+    $ConfirmBar.Visibility = 'Collapsed'; $StatusText.Text = 'sempre permitido — gravado no zquick.json'
 })
 
 # ---------- ask_user: painel de decisao multipla-escolha (estilo Claude Code) ----------

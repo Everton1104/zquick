@@ -2,7 +2,7 @@
   "profile": "zai",
   "model": "auto",
   "hotkey": "alt+q",
-  "maxTokens": 2048,
+  "maxTokens": 4096,
   "searchEngine": "bing",
   "hideOnBlur": false,
   "systemPrompt": null,
@@ -37,5 +37,9 @@
         "glm-5.3"
       ]
     }
+  },
+  "allow": {
+    "runPs": [],
+    "paths": []
   }
 }
