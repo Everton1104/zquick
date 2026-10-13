@@ -76,6 +76,24 @@ USO
                 na hora (o texto que já chegou fica no card).
   ✉ ........... digitar durante a resposta ENFILEIRA a mensagem: ela
                 vai sozinha quando a resposta acabar.
+  ⚙ ........... CONFIGURAÇÕES sem mexer em arquivo: 4 abas (Perfil
+                & chaves / Janela / Aparência / Geral) cobrem chave de
+                API e modelos por perfil, tamanho e centralização da
+                janela, opacidade, fonte e tamanho do texto, as 14
+                cores do tema, buscador, maxTokens, promptCache,
+                hideOnBlur e systemPrompt. Aplica na hora o que dá
+                (janela, opacidade, fonte, textos); cores completas
+                valem ao REABRIR; troca de chave/modelo recria o motor
+                no próximo envio.
+  — ▢ ✕ ........ moldura própria (sem a barra do Windows): — e ✕
+                OCULTAM para a bandeja (não fecham o app — sair de
+                verdade é no menu do ícone Z); ▢ maximiza/restaura
+                (duplo clique no topo também). Arraste pelo topo;
+                bordas/redimensionamento continuam do Windows.
+  JANELA ....... o tamanho e a posição da janela são MEMORIZADOS —
+                arraste e redimensione à vontade, o próximo abrir
+                volta como você deixou (marque "centralizar" no ⚙
+                para abrir sempre no centro).
   Ícone Z na bandeja: duplo clique = mostrar; botão direito = Sair.
 
 ANEXOS DE ARQUIVO
@@ -169,9 +187,13 @@ CONFIG EXTRA (zquick.json, topo)
                    disponíveis ao assistente com prefixo mcp_ (ver
                    AGENTE WINDOWS acima)
 
-PERSONALIZAÇÃO (zquick.json, topo)
+PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
+  Tudo abaixo aparece com campos prontos na aba certa do ⚙; editar o
+  json à mão dá no mesmo (reinicie o app depois).
+
   windowOpacity .. opacidade da janela: 1.0 = opaca, 0.8 = 80%, 0.5 =
-                   metade. Aplica ao abrir o app.
+                   metade. Aplica ao abrir o app (no ⚙ muda na hora,
+                   com régua de 40-100%).
   theme .......... paleta de cores da janela inteira (fundo, texto,
                    links, respostas, ícone da bandeja). Chaves e o que
                    cada uma pinta (tudo em HEX #RRGGBB):
@@ -195,10 +217,11 @@ PERSONALIZAÇÃO (zquick.json, topo)
       "trayA": "#3B78FF", "trayB": "#1F4FC4"
     }
 
-  Sem a seção "theme" vale a paleta escura padrão do ZQuick. Só
-  passe cores hex válidas (# + 6 dígitos) — valor errado abre com as
-  cores padrão. Reinicie o app (Sair na bandeja → abrir de novo) para
-  aplicar.
+  Sem a seção "theme" vale a paleta escura padrão do ZQuick (o botão
+  "restaurar padrão" no ⚙ devolve ela). Só passe cores hex válidas
+  (# + 6 dígitos) — valor errado abre com as cores padrão. Editando o
+  json, reinicie o app (Sair na bandeja → abrir de novo) para aplicar;
+  pelo ⚙ o fundo/textos mudam na hora e o resto vale ao reabrir.
 
 DESINSTALAR
   Dê dois cliques em DESINSTALAR.cmd (na pasta do kit). Ele encerra o

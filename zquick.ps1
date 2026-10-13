@@ -42,6 +42,10 @@ $cfg = @{
     hideOnBlur    = $false
     systemPrompt  = $null
     windowOpacity = 1.0
+    # Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta
+    window        = @{ width = 860; height = 600; x = $null; y = $null; center = $true }
+    answerFont    = $null      # null = Cascadia Mono (padrão)
+    answerFontSize = 13
     theme         = $null
     allow         = @{ runPs = @(); paths = @() }   # "sempre permitir": comandos exatos + pastas liberadas
     mcpServers    = $null      # Onda 4: { "nome": { "command": "...", "args": [...], "env": {...} } } — servidores MCP stdio
@@ -60,8 +64,13 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','mcpServers')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','answerFont','answerFontSize','mcpServers')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
+        }
+        if ($j.window) {
+            $w2 = @{ width = $cfg.window.width; height = $cfg.window.height; x = $cfg.window.x; y = $cfg.window.y; center = $cfg.window.center }
+            foreach ($k in @('width','height','x','y','center')) { if ($null -ne $j.window.$k) { $w2[$k] = $j.window.$k } }
+            $cfg.window = $w2
         }
         if ($j.theme) { $cfg.theme = $j.theme }
         if ($j.profiles) { $cfg.profiles = $j.profiles }
@@ -83,6 +92,7 @@ $T = @{
     accent2 = '#8B7CF6'  # cursor/streaming
     code   = '#A9DCFC'; trayA = '#8B7CF6'; trayB = '#6358C8'
 }
+$themeDefaults = $T.Clone()   # Onda 6: base p/ "restaurar cores padrão" no diálogo ⚙
 if ($cfg.theme) {
     foreach ($k in @($cfg.theme.PSObject.Properties.Name)) { if ($T.ContainsKey($k)) { $T[$k] = [string]$cfg.theme.$k } }
 }
@@ -104,6 +114,7 @@ function Save-Config {
             profile = $cfg.profile; model = $cfg.model; hotkey = $cfg.hotkey; maxTokens = $cfg.maxTokens
             searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity
+            window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
             theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
         [pscustomobject]$out | ConvertTo-Json -Depth 6 | Set-Content -Path $cfgPath -Encoding utf8
@@ -2070,8 +2081,15 @@ $xamlStr = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="ZQuick — busca rápida" Width="860" Height="600" MinWidth="520" MinHeight="360"
+        WindowStyle="None" ResizeMode="CanResize"
         WindowStartupLocation="CenterScreen" ShowInTaskbar="False"
         Background="#202024" UseLayoutRounding="True" FontFamily="Segoe UI">
+  <!-- Onda 6: moldura própria — a faixa do topo vira a "caption" (arrastável);
+       bordas de resize/snap continuam do sistema via WindowChrome -->
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="40" ResizeBorderThickness="6" GlassFrameThickness="1"
+                  CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
   <Window.Resources>
     <Style TargetType="Button">
       <Setter Property="Background" Value="#2A2A30"/>
@@ -2081,17 +2099,35 @@ $xamlStr = @'
       <Setter Property="FontSize" Value="12"/>
       <Setter Property="Cursor" Value="Hand"/>
     </Style>
+    <Style x:Key="ChromeBtn" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#3A3A44"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
   </Window.Resources>
   <DockPanel>
     <Border DockPanel.Dock="Top" Padding="14,10,14,8">
       <DockPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-          <ComboBox x:Name="ProfileBox" Width="110" FontSize="12" VerticalContentAlignment="Center" ToolTip="Perfil / provedor LLM"/>
-          <ComboBox x:Name="ModelBox" Width="135" FontSize="12" Margin="8,0,0,0" VerticalContentAlignment="Center" ToolTip="Modelo"/>
-          <Button x:Name="CopyBtn" Content="Copiar" Margin="8,0,0,0"/>
-          <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0"/>
-          <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva"/>
-          <Button x:Name="CloseBtn" Content="✕" Margin="8,0,0,0"/>
+          <ComboBox x:Name="ProfileBox" Width="110" FontSize="12" VerticalContentAlignment="Center" ToolTip="Perfil / provedor LLM" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <ComboBox x:Name="ModelBox" Width="135" FontSize="12" Margin="8,0,0,0" VerticalContentAlignment="Center" ToolTip="Modelo" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <Button x:Name="CopyBtn" Content="Copiar" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <Button x:Name="SettingsBtn" Content="⚙" Margin="14,0,0,0" ToolTip="Configurações — chaves, janela, aparência, geral" Style="{StaticResource ChromeBtn}"/>
+          <Button x:Name="MinBtn" Content="—" ToolTip="ocultar na bandeja (Alt+Q traz de volta)" Style="{StaticResource ChromeBtn}"/>
+          <Button x:Name="MaxBtn" Content="▢" ToolTip="maximizar / restaurar" Style="{StaticResource ChromeBtn}"/>
+          <Button x:Name="CloseBtn" Content="✕" ToolTip="ocultar na bandeja (sair de verdade: ícone Z → Sair)" Style="{StaticResource ChromeBtn}"/>
         </StackPanel>
         <TextBlock Text="⚡ ZQuick" FontSize="15" FontWeight="SemiBold" Foreground="#E8E8EC" VerticalAlignment="Center"/>
       </DockPanel>
@@ -2172,7 +2208,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -2180,6 +2216,39 @@ if ($cfg.windowOpacity -and [double]$cfg.windowOpacity -gt 0 -and [double]$cfg.w
     $script:baseOpacity = [double]$cfg.windowOpacity
     $window.Opacity = $script:baseOpacity
 }
+
+# ---------- Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta ----------
+try {
+    if ([int]$cfg.window.width  -ge 520 -and [int]$cfg.window.height -ge 360) {
+        $window.Width  = [int]$cfg.window.width
+        $window.Height = [int]$cfg.window.height
+    }
+    if (-not $cfg.window.center -and $null -ne $cfg.window.x -and $null -ne $cfg.window.y) {
+        # lembrar última posição: clamp p/ tela virtual (não deixar a janela nascer fora)
+        $vxL = [System.Windows.SystemParameters]::VirtualScreenLeft;  $vyT = [System.Windows.SystemParameters]::VirtualScreenTop
+        $vxR = $vxL + [System.Windows.SystemParameters]::VirtualScreenWidth; $vyB = $vyT + [System.Windows.SystemParameters]::VirtualScreenHeight
+        $window.WindowStartupLocation = 'Manual'
+        $window.Left = [Math]::Max($vxL, [Math]::Min([double]$cfg.window.x, $vxR - $window.Width))
+        $window.Top  = [Math]::Max($vyT, [Math]::Min([double]$cfg.window.y, $vyB - 40))
+    }
+} catch { Log "boot-janela: $_" }
+if ($cfg.answerFontSize) { try { $AnswerDoc.FontSize = [double]$cfg.answerFontSize } catch {} }
+if ($cfg.answerFont)     { try { $AnswerDoc.FontFamily = [System.Windows.Media.FontFamily]::new([string]$cfg.answerFont) } catch {} }
+
+# redimensionar/mover salva (com atraso p/ não escrever a cada pixel); só normal+visível
+function Save-WindowPos {
+    if (-not $window.IsVisible -or $window.WindowState -ne 'Normal') { return }
+    $cfg.window.width  = [int]$window.Width
+    $cfg.window.height = [int]$window.Height
+    $cfg.window.x = [int]$window.Left; $cfg.window.y = [int]$window.Top
+    Save-Config
+    Log ("config: janela salva {0}x{1} @{2},{3}" -f $cfg.window.width, $cfg.window.height, $cfg.window.x, $cfg.window.y)
+}
+$script:winSaveTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:winSaveTimer.Interval = [TimeSpan]::FromMilliseconds(1200)
+$script:winSaveTimer.Add_Tick({ $script:winSaveTimer.Stop(); Save-WindowPos })
+$window.Add_SizeChanged({ if (-not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() } })
+$window.Add_LocationChanged({ if (-not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() } })
 
 # ---------- estado ----------
 $script:busy = $false
@@ -2733,6 +2802,349 @@ function Load-Conversation([string]$file) {
     } catch { Log "load-history: $_"; $StatusText.Text = "erro ao retomar: $_" }
 }
 
+# ---------- Onda 6: dialogo de configuracoes (⚙) ----------
+function Set-CfgProp($obj, [string]$name, $value) {
+    # grava propriedade em PSCustomObject (json) OU hashtable (defaults)
+    if ($obj -is [System.Collections.IDictionary]) { $obj[$name] = $value }
+    elseif ($obj.PSObject.Properties[$name]) { $obj.$name = $value }
+    else { Add-Member -InputObject $obj -MemberType NoteProperty -Name $name -Value $value -Force }
+}
+function Get-CfgProp($obj, [string]$name) {
+    if ($obj -is [System.Collections.IDictionary]) { return $obj[$name] }
+    return $obj.$name
+}
+function Show-Settings {
+    try {
+        $sxStr = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ZQuick — configurações" Width="640" Height="600" MinWidth="520" MinHeight="420"
+        WindowStyle="None" ResizeMode="CanResize" WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False" Background="#202024" FontFamily="Segoe UI">
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="36" ResizeBorderThickness="6" GlassFrameThickness="1"
+                  CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="#2A2A30"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="Padding" Value="10,4"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style x:Key="ChromeBtn" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#3A3A44"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+  </Window.Resources>
+  <DockPanel>
+    <Border DockPanel.Dock="Top" Padding="14,8,4,6">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" x:Name="SetClose" Content="✕" ToolTip="fechar (descarta)" Style="{StaticResource ChromeBtn}"/>
+        <TextBlock Text="⚙ Configurações" FontSize="14" FontWeight="SemiBold" Foreground="#E8E8EC" VerticalAlignment="Center"/>
+      </DockPanel>
+    </Border>
+    <Border DockPanel.Dock="Bottom" Padding="14,8,14,10">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <TextBlock x:Name="SetStatus" Foreground="#6E6E7A" FontSize="11" VerticalAlignment="Center" Margin="0,0,12,0" Text="Aplicar grava no zquick.json"/>
+        <Button x:Name="SetApply" Content="✔ Aplicar" FontWeight="SemiBold" IsDefault="True"/>
+        <Button x:Name="SetCancel" Content="Cancelar" Margin="8,0,0,0" IsCancel="True"/>
+      </StackPanel>
+    </Border>
+    <TabControl Background="#202024" BorderThickness="0" Margin="6,0,6,6">
+      <TabItem Header="Perfil &amp; chaves">
+        <Border Background="#16161A" Padding="12">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+              <TextBlock Text="Perfil (troque/crie perfis no zquick.json; aqui edita o selecionado)" Foreground="#6E6E7A" FontSize="11" Margin="0,0,0,4"/>
+              <ComboBox x:Name="SetProfile" FontSize="12" HorizontalAlignment="Left" MinWidth="200"/>
+              <TextBlock Text="Chave da API — cole uma nova para trocar (vazio = mantém a atual/herdada)" Foreground="#9A9AA5" FontSize="11" Margin="0,12,0,4"/>
+              <PasswordBox x:Name="SetKey" FontFamily="Cascadia Mono, Consolas"/>
+              <TextBlock Text="Base URL (vazio = herda de ~/.claude/settings.json)" Foreground="#9A9AA5" FontSize="11" Margin="0,10,0,4"/>
+              <TextBox x:Name="SetBase" FontFamily="Cascadia Mono, Consolas"/>
+              <Grid Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                  <TextBlock Text="fastModel (rápido)" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+                  <TextBox x:Name="SetFast" FontFamily="Cascadia Mono, Consolas"/>
+                  <TextBlock Text="bigModel (forte, modo auto)" Foreground="#9A9AA5" FontSize="11" Margin="0,10,0,4"/>
+                  <TextBox x:Name="SetBig" FontFamily="Cascadia Mono, Consolas"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <TextBlock Text="visionModel (lê imagem)" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+                  <TextBox x:Name="SetVision" FontFamily="Cascadia Mono, Consolas"/>
+                  <TextBlock Text="modelos (vírgula — caixa do topo)" Foreground="#9A9AA5" FontSize="11" Margin="0,10,0,4"/>
+                  <TextBox x:Name="SetModels" FontFamily="Cascadia Mono, Consolas"/>
+                </StackPanel>
+              </Grid>
+              <TextBlock Text="Se o perfil editado for o atual, o motor é recriado no próximo envio." Foreground="#6E6E7A" FontSize="11" Margin="0,12,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </ScrollViewer>
+        </Border>
+      </TabItem>
+      <TabItem Header="Janela">
+        <Border Background="#16161A" Padding="12">
+          <StackPanel>
+            <TextBlock Text="Tamanho (largura × altura, em DIP)" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+            <StackPanel Orientation="Horizontal">
+              <TextBox x:Name="SetW" Width="80" FontFamily="Cascadia Mono, Consolas"/>
+              <TextBlock Text=" × " Foreground="#9A9AA5" VerticalAlignment="Center"/>
+              <TextBox x:Name="SetH" Width="80" FontFamily="Cascadia Mono, Consolas"/>
+            </StackPanel>
+            <CheckBox x:Name="SetCenter" Content="centralizar ao abrir (desmarcado = reabrir na última posição)" Foreground="#E8E8EC" Margin="0,14,0,0"/>
+            <TextBlock Text="Opacidade" Foreground="#9A9AA5" FontSize="11" Margin="0,16,0,2"/>
+            <StackPanel Orientation="Horizontal">
+              <Slider x:Name="SetOpacity" Width="260" Minimum="0.4" Maximum="1.0" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+              <TextBlock x:Name="SetOpVal" Foreground="#E8E8EC" FontSize="12" VerticalAlignment="Center" Margin="10,0,0,0"/>
+            </StackPanel>
+            <TextBlock Text="Arrastar/redimensionar também memoriza (salva 1s depois de soltar o mouse)." Foreground="#6E6E7A" FontSize="11" Margin="0,14,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+        </Border>
+      </TabItem>
+      <TabItem Header="Aparência">
+        <Border Background="#16161A" Padding="12">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <StackPanel>
+                  <TextBlock Text="Fonte da área de resposta" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+                  <ComboBox x:Name="SetFont" IsEditable="True" MinWidth="240" FontSize="12"/>
+                </StackPanel>
+                <StackPanel Margin="16,0,0,0">
+                  <TextBlock Text="Tamanho" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+                  <TextBox x:Name="SetFontSize" Width="60" FontFamily="Cascadia Mono, Consolas"/>
+                </StackPanel>
+              </StackPanel>
+              <TextBlock Text="Cores (hex #RRGGBB — efeito completo ao reabrir; principais superfícies aplicam na hora)" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,6"/>
+              <UniformGrid x:Name="SetColors" Columns="2"/>
+              <Button x:Name="SetResetColors" Content="restaurar cores padrão" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+            </StackPanel>
+          </ScrollViewer>
+        </Border>
+      </TabItem>
+      <TabItem Header="Geral">
+        <Border Background="#16161A" Padding="12">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+              <TextBlock Text="Busca web" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+              <ComboBox x:Name="SetSearch" FontSize="12" HorizontalAlignment="Left" MinWidth="200"/>
+              <TextBlock Text="maxTokens (teto da resposta)" Foreground="#9A9AA5" FontSize="11" Margin="0,12,0,4"/>
+              <TextBox x:Name="SetMaxTok" Width="100" FontFamily="Cascadia Mono, Consolas"/>
+              <CheckBox x:Name="SetCache" Content="cache de prompt (cache_control no system+tools)" Foreground="#E8E8EC" Margin="0,14,0,0"/>
+              <CheckBox x:Name="SetHideBlur" Content="fechar a janela ao perder o foco" Foreground="#E8E8EC" Margin="0,10,0,0"/>
+              <TextBlock Text="systemPrompt (personalidade; vazio = padrão)" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,4"/>
+              <TextBox x:Name="SetSys" AcceptsReturn="True" TextWrapping="Wrap" Height="110" VerticalScrollBarVisibility="Auto"/>
+            </StackPanel>
+          </ScrollViewer>
+        </Border>
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>
+'@
+        [xml]$sx = Theme-Xaml $sxStr
+        $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
+        $g = @{}
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetW','SetH','SetCenter','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
+            $g[$n] = $sw.FindName($n)
+        }
+        # ---- carrega valores atuais ----
+        $profNames = @($cfg.profiles.PSObject.Properties.Name)
+        $g['SetProfile'].ItemsSource = $profNames
+        $g['SetProfile'].SelectedItem = [string]$cfg.profile
+        $g['SetSearch'].ItemsSource = @('zai-server', 'bing', 'zai')
+        $g['SetSearch'].SelectedItem = [string]$cfg.searchEngine
+        $g['SetFont'].ItemsSource = @('Cascadia Mono, Consolas', 'Cascadia Code, Consolas', 'Consolas', 'Courier New', 'Segoe UI', 'JetBrains Mono, Consolas')
+        $g['SetFont'].Text = "$(if ($cfg.answerFont) { [string]$cfg.answerFont } else { 'Cascadia Mono, Consolas' })"
+        $g['SetFontSize'].Text = [string]$(if ($cfg.answerFontSize) { [int]$cfg.answerFontSize } else { 13 })
+        $g['SetW'].Text = [string][int]$cfg.window.width
+        $g['SetH'].Text = [string][int]$cfg.window.height
+        $g['SetCenter'].IsChecked = [bool]$cfg.window.center
+        $op0 = [double]$cfg.windowOpacity; if ($op0 -le 0 -or $op0 -gt 1) { $op0 = 1.0 }
+        $g['SetOpacity'].Value = $op0
+        $g['SetOpVal'].Text = ('{0:P0}' -f $op0)
+        $g['SetMaxTok'].Text = [string][int]$cfg.maxTokens
+        $g['SetCache'].IsChecked = [bool]$cfg.promptCache
+        $g['SetHideBlur'].IsChecked = [bool]$cfg.hideOnBlur
+        $g['SetSys'].Text = "$(if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else { '' })"
+
+        # estado do dialogo em escopo de SCRIPT + handlers como scriptblocks simples:
+        # "$script:" dentro de GetNewClosure resolve no modulo da closure, NAO aqui (licao ask_user)
+        $script:setG = $g
+        $script:setSW = $sw
+        $script:setProfNames = $profNames
+        $script:setFillProf = { param([string]$pn)
+            $p = $cfg.profiles.$pn
+            if (-not $p) { return }
+            $script:setG['SetBase'].Text   = "$(if (Get-CfgProp $p 'baseUrl') { [string](Get-CfgProp $p 'baseUrl') } else { '' })"
+            $script:setG['SetFast'].Text   = "$(if (Get-CfgProp $p 'fastModel') { [string](Get-CfgProp $p 'fastModel') } else { '' })"
+            $script:setG['SetBig'].Text    = "$(if (Get-CfgProp $p 'bigModel')  { [string](Get-CfgProp $p 'bigModel')  } else { '' })"
+            $script:setG['SetVision'].Text = "$(if (Get-CfgProp $p 'visionModel') { [string](Get-CfgProp $p 'visionModel') } else { '' })"
+            $ms = @(Get-CfgProp $p 'models') | ForEach-Object { [string]$_ }
+            $script:setG['SetModels'].Text = $ms -join ', '
+            $script:setG['SetKey'].Clear()
+        }
+        $g['SetProfile'].Add_SelectionChanged({ param($s, $e)
+            & $script:setFillProf ([string]$s.SelectedItem)
+        })
+        & $script:setFillProf ([string]$cfg.profile)
+
+        # ---- grade de cores (swatch + nome + hex) ----
+        $colorKeys = @('bg','card','panel','input','border','fg','dim','status','q','accent','accent2','code','trayA','trayB')
+        $boxes = @{}
+        foreach ($k in $colorKeys) {
+            $row = [System.Windows.Controls.StackPanel]::new(); $row.Orientation = 'Horizontal'; $row.Margin = '0,0,8,6'
+            $swRect = [System.Windows.Shapes.Rectangle]::new()
+            $swRect.Width = 16; $swRect.Height = 16
+            $swRect.Stroke = '#3A3A44'; $swRect.StrokeThickness = 1
+            try { $swRect.Fill = $T[$k] } catch {}
+            $lbl = [System.Windows.Controls.TextBlock]::new()
+            $lbl.Text = $k; $lbl.Width = 64; $lbl.Foreground = $T.status; $lbl.FontSize = 11
+            $lbl.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
+            $lbl.VerticalAlignment = 'Center'
+            $bx = [System.Windows.Controls.TextBox]::new()
+            $bx.Width = 90; $bx.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas'); $bx.FontSize = 11
+            $bx.Text = $T[$k]; $bx.VerticalAlignment = 'Center'
+            $bx.Tag = $swRect
+            $bx.Add_TextChanged({ param($s2, $e2)
+                try { $s2.Tag.Fill = ([System.Windows.Media.ColorConverter]::ConvertFromString($s2.Text)) -as [System.Windows.Media.SolidColorBrush] } catch {}
+            })
+            $null = $row.Children.Add($swRect); $null = $row.Children.Add($lbl); $null = $row.Children.Add($bx)
+            $null = $g['SetColors'].Children.Add($row)
+            $boxes[$k] = $bx
+        }
+        $script:setBoxes = $boxes
+        $script:setColorKeys = $colorKeys
+        $g['SetResetColors'].Add_Click({
+            foreach ($k in $script:setColorKeys) { $script:setBoxes[$k].Text = $themeDefaults[$k] }
+        })
+
+        # ---- preview de opacidade ao vivo ----
+        $g['SetOpacity'].Add_ValueChanged({ param($s2, $e2)
+            $window.Opacity = $s2.Value
+            $script:setG['SetOpVal'].Text = ('{0:P0}' -f $s2.Value)
+        })
+
+        $script:setSnap = (@($profNames | ForEach-Object {
+            $p = $cfg.profiles.$_
+            "$_=$([string](Get-CfgProp $p 'baseUrl'))|$([string](Get-CfgProp $p 'fastModel'))|$([string](Get-CfgProp $p 'bigModel'))|$([string](Get-CfgProp $p 'visionModel'))"
+        }) -join ';') + "|$($cfg.searchEngine)|$($cfg.maxTokens)|$($cfg.systemPrompt)|$($cfg.promptCache)"
+
+        Log ("config: dialogo (perfis {0})" -f $profNames.Count)
+
+        $g['SetClose'].Add_Click({ $script:setSW.DialogResult = $false })
+        $g['SetCancel'].Add_Click({ $window.Opacity = $script:baseOpacity })   # desfaz preview
+
+        $g['SetApply'].Add_Click({
+            try {
+                $bad = @()
+                # perfil
+                $pn = [string]$script:setG['SetProfile'].SelectedItem
+                if ($pn -and $cfg.profiles.$pn) {
+                    $p = $cfg.profiles.$pn
+                    $nb = $script:setG['SetBase'].Text.Trim()
+                    Set-CfgProp $p 'baseUrl' $(if ($nb) { $nb } else { $null })
+                    foreach ($fld in @(@('SetFast','fastModel'), @('SetBig','bigModel'), @('SetVision','visionModel'))) {
+                        $v = $script:setG[$fld[0]].Text.Trim()
+                        if ($v) { Set-CfgProp $p $fld[1] $v }
+                    }
+                    $nk = $script:setG['SetKey'].Password.Trim()
+                    if ($nk) { Set-CfgProp $p 'apiKey' $nk }
+                    $ml = @($script:setG['SetModels'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                    if ($ml.Count -gt 0) { Set-CfgProp $p 'models' $ml }
+                }
+                # janela
+                $wv = 0; $hv = 0
+                if (-not [int]::TryParse($script:setG['SetW'].Text.Trim(), [ref]$wv) -or $wv -lt 520 -or $wv -gt 3840) { $bad += 'largura (520-3840)' }
+                if (-not [int]::TryParse($script:setG['SetH'].Text.Trim(), [ref]$hv) -or $hv -lt 360 -or $hv -gt 2160) { $bad += 'altura (360-2160)' }
+                if ($bad.Count -eq 0) { $cfg.window.width = $wv; $cfg.window.height = $hv }
+                $cfg.window.center = [bool]$script:setG['SetCenter'].IsChecked
+                $opv = [double]$script:setG['SetOpacity'].Value
+                $cfg.windowOpacity = $opv
+                # aparencia
+                $fsz = 0.0
+                if (-not [double]::TryParse($script:setG['SetFontSize'].Text.Trim(), [ref]$fsz) -or $fsz -lt 10 -or $fsz -gt 22) { $bad += 'tamanho da fonte (10-22)'; $fsz = 0 }
+                $fnt = $script:setG['SetFont'].Text.Trim()
+                if ($bad.Count -eq 0) {
+                    $cfg.answerFontSize = $fsz
+                    $cfg.answerFont = $fnt
+                }
+                $newTheme = [ordered]@{}
+                foreach ($k in $script:setColorKeys) {
+                    $hx = $script:setBoxes[$k].Text.Trim()
+                    if ($hx -match '^#[0-9A-Fa-f]{6}$') { $newTheme[$k] = $hx }
+                    else { $bad += "cor $k"; $newTheme[$k] = $T[$k] }
+                }
+                $allDef = $true
+                foreach ($k in $script:setColorKeys) { if ($newTheme[$k] -ne $themeDefaults[$k]) { $allDef = $false } }
+                if ($bad.Count -eq 0) {
+                    $cfg.theme = $(if ($allDef) { $null } else { [pscustomobject]$newTheme })
+                    foreach ($k in $script:setColorKeys) { $T[$k] = $newTheme[$k] }
+                }
+                # geral
+                $cfg.searchEngine = [string]$script:setG['SetSearch'].SelectedItem
+                $mt = 0
+                if ([int]::TryParse($script:setG['SetMaxTok'].Text.Trim(), [ref]$mt) -and $mt -ge 512 -and $mt -le 32768) { $cfg.maxTokens = $mt }
+                else { $bad += 'maxTokens (512-32768)' }
+                $cfg.promptCache = [bool]$script:setG['SetCache'].IsChecked
+                $cfg.hideOnBlur  = [bool]$script:setG['SetHideBlur'].IsChecked
+                $sp = $script:setG['SetSys'].Text.Trim()
+                $cfg.systemPrompt = $(if ($sp) { $sp } else { $null })
+
+                if ($bad.Count -gt 0) {
+                    $script:setG['SetStatus'].Text = '✕ não aplicado: ' + ($bad -join ', ')
+                    return
+                }
+                Save-Config
+
+                # ---- aplica ao vivo o que dá ----
+                $window.Width = $cfg.window.width; $window.Height = $cfg.window.height
+                $script:baseOpacity = $cfg.windowOpacity; $window.Opacity = $script:baseOpacity
+                try { $AnswerDoc.FontSize = [double]$cfg.answerFontSize } catch {}
+                try { $AnswerDoc.FontFamily = [System.Windows.Media.FontFamily]::new([string]$cfg.answerFont) } catch {}
+                $window.Background = $T.bg
+                $AnswerDoc.Foreground = $T.fg
+                $StatusText.Foreground = $T.status; $ModelText.Foreground = $T.dim
+                $InputBox.Background = $T.input; $InputBox.Foreground = $T.fg; $InputBox.CaretBrush = $T.fg
+                if ($cfg.window.center) { Center-Window }
+                # motor usa varios desses valores -> recria se mudou algo relevante
+                $snapNow = (@($script:setProfNames | ForEach-Object {
+                    $p2 = $cfg.profiles.$_
+                    "$_=$([string](Get-CfgProp $p2 'baseUrl'))|$([string](Get-CfgProp $p2 'fastModel'))|$([string](Get-CfgProp $p2 'bigModel'))|$([string](Get-CfgProp $p2 'visionModel'))"
+                }) -join ';') + "|$($cfg.searchEngine)|$($cfg.maxTokens)|$($cfg.systemPrompt)|$($cfg.promptCache)"
+                $engNote = ''
+                if ($snapNow -ne $script:setSnap -or $script:setG['SetKey'].Password.Trim()) {
+                    if (-not $script:busy -and $script:engine) { $script:engine = $null; $engNote = ' • motor recriado no próximo envio' }
+                }
+                if ($pn -eq [string]$cfg.profile) { Update-ModelBox }
+                Update-ProfileBox
+                Log ("config: aplicado (janela {0}x{1}, opacidade {2:P0}, fonte {3}pt{4})" -f $cfg.window.width, $cfg.window.height, $cfg.windowOpacity, $cfg.answerFontSize, $engNote)
+                $script:setG['SetStatus'].Text = '✓ aplicado — cores completas ao reabrir' + $engNote
+                $script:setG['SetKey'].Clear()
+            } catch { Log "config erro: $_"; $script:setG['SetStatus'].Text = "✕ $_" }
+        })
+
+        $sw.Owner = $window
+        $null = $sw.ShowDialog()
+        $window.Opacity = $script:baseOpacity   # garante preview desfeito
+    } catch { Log "settings: $_" }
+}
+
 function Show-History {
     try {
         New-Item -ItemType Directory -Force $histDir | Out-Null
@@ -2968,7 +3380,7 @@ function Toggle-Window {
         Log 'toggle'
         if ($window.IsVisible) { $window.Hide() }
         else {
-            Center-Window
+            if ($cfg.window.center) { Center-Window }
             $window.Show(); [void]$window.Activate()
             [void]$InputBox.Focus()
             Reset-Conversation
@@ -3032,7 +3444,14 @@ $SendBtn.Add_Click({
         Log 'parar: cancel solicitado'
     } else { Send-Current }
 })
-$CloseBtn.Add_Click({ $window.Hide() })
+# Onda 6: botões da moldura própria — tudo SEM SAIR do app (bandeja)
+$CloseBtn.Add_Click({ Log 'chrome: ocultado (✕)'; $window.Hide() })
+$MinBtn.Add_Click({ Log 'chrome: ocultado (—)'; $window.Hide() })
+$MaxBtn.Add_Click({
+    if ($window.WindowState -eq 'Maximized') { $window.WindowState = 'Normal'; Log 'chrome: restaurado' }
+    else { $window.WindowState = 'Maximized'; Log 'chrome: maximizado' }
+})
+$SettingsBtn.Add_Click({ Show-Settings })
 $NewBtn.Add_Click({ New-Conversation })
 $HistBtn.Add_Click({ Show-History })
 $CopyBtn.Add_Click({ if ($script:lastAnswer) { Set-Clipboard -Value $script:lastAnswer; $StatusText.Text = 'resposta copiada' } })
@@ -3067,7 +3486,7 @@ function Show-PlanBar($c) {
         $null = $PlanSteps.Children.Add($tb)
     }
     $PlanBar.Visibility = 'Visible'
-    if (-not $window.IsVisible) { Center-Window; $window.Show() }
+    if (-not $window.IsVisible) { if ($cfg.window.center) { Center-Window }; $window.Show() }
     [void]$window.Activate()
     [void]$PlanYes.Focus()
     # ecoa o plano na conversa (card proprio)
@@ -3261,7 +3680,7 @@ function Show-AskBar($c) {
     $AskFreeRow.Visibility = 'Collapsed'; $AskInput.Text = ''
     $AskBar.Visibility = 'Visible'
     # pergunta exige o usuario: janela oculta precisa aparecer
-    if (-not $window.IsVisible) { Center-Window; $window.Show() }
+    if (-not $window.IsVisible) { if ($cfg.window.center) { Center-Window }; $window.Show() }
     [void]$window.Activate()
     try { [void]@($AskPanel.Children)[0].Focus() } catch {}
     # ecoa as perguntas na conversa (fica no card junto da resposta dada)
