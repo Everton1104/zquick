@@ -67,6 +67,22 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   descrição (frontmatter `name:`/`description:`) listados no system
   (cap 20); `skill_read` carrega as instruções completas sob demanda;
   só entra nas tools quando existir pelo menos uma
+
+**Janela**
+- **⚙ Configurações** dentro do app (4 abas: Perfil & chaves / Janela /
+  Aparência / Geral): chave de API por perfil (PasswordBox), modelos,
+  largura/altura/centralização, régua de opacidade 40–100%, fonte e
+  tamanho do texto das respostas, as 14 cores do tema (swatch ao vivo +
+  restaurar padrão), buscador, maxTokens, promptCache, hideOnBlur e
+  systemPrompt — aplica na hora o que dá (janela, opacidade, fonte,
+  textos) e recria o engine quando a chave/modelo muda
+- **Moldura customizada** (`WindowStyle=None` + `WindowChrome`):
+  botões próprios **— ▢ ✕** — — e ✕ ocultam para a bandeja (saída real
+  no menu do tray), ▢ maximiza/restaura, duplo clique no topo maximiza;
+  arraste pelo cabeçalho, bordas de resize/snap/sombra do Windows
+  preservadas
+- **Janela memorizada**: último tamanho e posição voltam no próximo
+  abrir (save com debounce; `window.center` = abrir sempre no centro)
 - Botão **⏹ Parar** (parcial preservada), **fila de mensagens** durante
   a resposta, retry com backoff 1/3/8s (429/5xx/rede), watchdog de
   stream (120s sem dados corta o turno)
@@ -103,6 +119,8 @@ ou direto no `zquick.json` do perfil.
 | `promptCache` | `true` | cache_control no system+tools |
 | `hotkey` / `maxTokens` / `hideOnBlur` | `alt+q` / 4096 / false | atalho, teto da resposta, fechar ao perder foco |
 | `windowOpacity` / `theme` | 1.0 / — | opacidade e paleta (15 chaves hex) |
+| `window` | 860×600, centro | `width,height,x,y` memorizados + `center` |
+| `answerFont` / `answerFontSize` | — / 13 | fonte do texto das respostas |
 | `allow` | — | `runPs` (comandos exatos) e `paths` (pastas) do "✔ Sempre" |
 | `mcpServers` | — | `{ nome: { command, args[] } }` — servidores MCP stdio (tools viram `mcp_*`) |
 | `profiles.{nome}` | — | `label, baseUrl, apiKey, fastModel, bigModel, visionModel, models[]` |
@@ -130,7 +148,8 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   (`test-atdialog`), busca server/cache (`test-zaiserver`, `test-zai-cache`),
   paralelo+MCP (`test-parallel-engine`, `test-mcp-engine` +
   fixture `test-mcp-server.ps1`, `test-par4-ui`), subagente/skills
-  (`test-sub-engine` com API real, `test-skills-engine`, `test-wave5-ui`)
+  (`test-sub-engine` com API real, `test-skills-engine`, `test-wave5-ui`),
+  moldura+⚙ (`test-wave6-ui`)
 
 ## Arquitetura em 1 parágrafo
 
@@ -153,6 +172,11 @@ UTF-16LE + sentinela `__ZQEND__<tag>|<cwd>|<exit>`). Plano e ask_user
 são gates (ManualResetEventSlim) que pausam o turno até a UI decidir.
 Conversas salvas por completo (inclusive imagens em base64) em
 `history/conv-*.json`; compactação oferecida no limiar (28 msgs/150 KB).
+A janela usa `WindowChrome` (caption 40px arrastável, botões próprios
+— ▢ ✕ como estilo `ChromeBtn`) e o diálogo ⚙ compartilha a mesma
+moldura; handlers do diálogo são scriptblocks simples com estado em
+`$script:set*` (`$script:` dentro de `GetNewClosure` resolve no módulo
+da closure — não usar os dois juntos).
 
 ## Paridade com o Claude Code
 
@@ -164,10 +188,12 @@ multi+preview, modo plano, cache de prompt, verificação pós-escrita,
 medidor de contexto, **tools de leitura em paralelo** e **cliente
 MCP**. A **Onda 5** (`fd14a10`) foi além do comparativo: **subagente
 de leitura** com contexto próprio (estilo Explore/Task do Claude
-Code) e **skills** em `.md` (estilo skills do Claude Code). O que
-resta é plugins de propósito específico. E o ZQuick faz coisas que o
-Claude Code não faz: residente Alt+Q + bandeja, anexos por Ctrl+V,
-histórico retomável com imagens.
+Code) e **skills** em `.md` (estilo skills do Claude Code). A
+**Onda 6** (`3474ddf`) cuidou do shell visual: **menu ⚙ de
+configurações** (equivalente ao `/config`) e **moldura própria**
+com janela memorizada. E o ZQuick faz coisas que o Claude Code não
+faz: residente Alt+Q + bandeja, anexos por Ctrl+V, histórico
+retomável com imagens.
 
 ## Versões
 
@@ -181,6 +207,7 @@ histórico retomável com imagens.
 | `c62e720` | Onda 3 — busca server-side Z.ai, prompt cache, shell persistente, @menção, ask_user multi+preview, modo plano |
 | `7bd4b0e` | Onda 4 — tools de leitura em paralelo (ordem preservada), cliente MCP stdio (`mcpServers`) |
 | `fd14a10` | Onda 5 — subagente de leitura (`research`, contexto próprio) + skills `.md` (`skill_read`) |
+| `3474ddf` | Onda 6 — menu ⚙ de configurações (4 abas) + moldura customizada — ▢ ✕ + janela memorizada |
 
 ## Notas de engenharia (lições)
 
@@ -208,5 +235,17 @@ histórico retomável com imagens.
   acento: "relatorio" ≠ "relatório") — padrão agnóstico `relat.rio`；
   e emoji astral em regex .NET conta **2 UTF-16 units** — `.{0,2}` não
   cobre "🤖 " (3 units).
+- **UIA**: diálogo WPF com `Owner` setado aparece como **FILHO da
+  janela principal** na árvore UIA (não do RootElement); TabControl
+  **só renderiza a aba selecionada** (elementos das outras não
+  existem — selecionar via SelectionItemPattern antes de achar);
+  PropertyCondition não aceita wildcard (FindAll + filtro `-like`).
+- **WindowChrome + XamlReader**: estilo de botão da moldura não pode
+  usar `BasedOn="{StaticResource {x:Type Button}}"` (quebra no Load)
+  — setters completos no próprio estilo; controles interativos no
+  cabeçalho precisam `WindowChrome.IsHitTestVisibleInChrome="True"`.
+- **`$script:` + `GetNewClosure` não se misturam** (o `$script:`
+  resolve no módulo da closure → null): handlers usam scriptblocks
+  simples com estado compartilhado em variáveis `$script:set*`.
 
 Log de diagnóstico: `%TEMP%\zquick.log`.
