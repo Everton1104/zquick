@@ -2976,8 +2976,9 @@ function Show-Settings {
               <PasswordBox x:Name="SetKey" FontFamily="Cascadia Mono, Consolas"/>
               <TextBlock Text="Base URL (vazio = herda de ~/.claude/settings.json)" Foreground="#9A9AA5" FontSize="11" Margin="0,10,0,4"/>
               <TextBox x:Name="SetBase" FontFamily="Cascadia Mono, Consolas"
-                       ToolTip="Endpoint base da API. O app chama &lt;base&gt;/v1/messages — o padrão Anthropic Messages. Serve qualquer provedor/gateway compatível."/>
-              <TextBlock Text="✓ Qualquer API de LLM no padrão Anthropic serve: o /v1/messages é incluído automaticamente (ex.: https://api.anthropic.com · https://api.z.ai/api/anthropic)" Foreground="#6E6E7A" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                       ToolTip="Endpoint base da API do provedor. O app chama &lt;base&gt;/v1/messages (padrão Anthropic Messages). Não precisa ser Anthropic: GLM/Z.ai, Kimi, DeepSeek, MiniMax e Qwen expõem esse mesmo padrão — cole a URL e a chave do provedor."/>
+              <TextBlock Text="✓ Não precisa ser Claude: qualquer LLM que exponha API no padrão Anthropic serve — GLM (Z.ai) · Kimi · DeepSeek · MiniMax · Qwen…" Foreground="#9A9AA5" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
+              <TextBlock Text="Cole a Base URL do provedor e a chave; o /v1/messages entra automático. Ex.: api.anthropic.com · api.z.ai/api/anthropic · api.moonshot.ai/anthropic · api.deepseek.com/anthropic · api.minimax.io/anthropic" Foreground="#6E6E7A" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
               <Grid Margin="0,12,0,0">
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
