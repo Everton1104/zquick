@@ -97,7 +97,11 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   combinação de overlay: pinado e translúcido sobre o trabalho. O
   Ctrl+roda funciona sobre **qualquer janela do app** (⚙ e histórico
   inclusos, que também abrem já na opacidade atual e acompanham o
-  preview da régua)
+  preview da régua). A transparência é **real** (vê-se a área de
+  trabalho através): as 3 janelas usam `AllowsTransparency="True"` —
+  `Window.Opacity` sozinho, com `WindowChrome` no Win11, só escurecia
+  contra preto; o histórico ganhou moldura própria (cabeçalho 🕘 + ✕)
+  porque `AllowsTransparency` exige `WindowStyle="None"`
 - Botão **⏹ Parar** (parcial preservada), **fila de mensagens** durante
   a resposta, retry com backoff 1/3/8s (429/5xx/rede), watchdog de
   stream (120s sem dados corta o turno)
@@ -166,7 +170,9 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   fixture `test-mcp-server.ps1`, `test-par4-ui`), subagente/skills
   (`test-sub-engine` com API real, `test-skills-engine`, `test-wave5-ui`),
   moldura+⚙ (`test-wave6-ui`), escala de fonte (`test-font-ui`),
-  pin/opacidade incluindo Ctrl+roda sobre o ⚙ aberto (`test-top-ui`)
+  pin/opacidade incluindo Ctrl+roda sobre o ⚙ aberto e **prova de
+  pixel** da transparência real (`test-top-ui`), histórico com moldura
+  nova (`test-histbtn-ui`)
 
 ## Arquitetura em 1 parágrafo
 
@@ -228,6 +234,7 @@ retomável com imagens.
 | `7d72eb5` | v3.8 — escala global de fonte: `answerFontSize` move a interface toda (pré-escala no parse + `FSz` + re-escala ao vivo no Aplicar) |
 | `ce02283` | v3.9 — 📌 sempre no topo (persistido) + Ctrl+roda ajusta opacidade ao vivo |
 | `3e3780d` | v3.9.1 — Ctrl+roda vale nas 3 janelas (⚙/histórico abrem na opacidade atual e seguem o preview da régua) |
+| `b34b7e2` | v3.9.2 — transparência REAL: `AllowsTransparency="True"` nas 3 janelas (sem ele `Window.Opacity`+`WindowChrome` só escurecia contra preto); histórico com moldura própria (🕘 + ✕) |
 
 ## Notas de engenharia (lições)
 
@@ -286,5 +293,16 @@ retomável com imagens.
   Roda do mouse é injetável (não é texto — TSF/IME não afeta):
   `mouse_event(MOUSEEVENTF_WHEEL, …, dwData:int, …)` com `dwData`
   negativo para baixo, cursor sobre a janela.
+- **`Window.Opacity` + `WindowChrome` no Win11 NÃO é transparência**:
+  a janela só escurece contra preto (blend com o fundo próprio, não com
+  a tela); `SetLayeredWindowAttributes` externo é ignorado. Quem
+  blendia de verdade na matriz de probes: `AllowsTransparency="True"`
+  (exige `WindowStyle="None"`) — e convive com `WindowChrome` (resize/
+  snap preservados, `GlassFrameThickness` irrelevante). Oráculo que
+  pegou isso: capturar `CopyFromScreen` da janela sobre um fundo
+  VERMELHO maximizado e contar pixels vermelhos — log/json diziam
+  "opacidade 50%" enquanto o pixel dizia opaco. `AllowsTransparency`
+  também muda a árvore UIA: diálogo com `WindowChrome` + `Owner` aninha
+  como FILHO da janela principal (não do RootElement).
 
 Log de diagnóstico: `%TEMP%\zquick.log`.
