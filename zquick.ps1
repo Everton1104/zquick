@@ -2096,7 +2096,7 @@ $xamlStr = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="ZQuick — busca rápida" Width="860" Height="600" MinWidth="520" MinHeight="360"
-        WindowStyle="None" ResizeMode="CanResize"
+        WindowStyle="None" ResizeMode="CanResize" AllowsTransparency="True"
         WindowStartupLocation="CenterScreen" ShowInTaskbar="False"
         Background="#202024" UseLayoutRounding="True" FontFamily="Segoe UI" FontSize="12">
   <!-- Onda 6: moldura própria — a faixa do topo vira a "caption" (arrastável);
@@ -2920,7 +2920,7 @@ function Show-Settings {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="ZQuick — configurações" Width="640" Height="600" MinWidth="520" MinHeight="420"
-        WindowStyle="None" ResizeMode="CanResize" WindowStartupLocation="CenterOwner"
+        WindowStyle="None" ResizeMode="CanResize" AllowsTransparency="True" WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False" Background="#202024" FontFamily="Segoe UI" FontSize="12">
   <WindowChrome.WindowChrome>
     <WindowChrome CaptionHeight="36" ResizeBorderThickness="6" GlassFrameThickness="1"
@@ -3263,7 +3263,12 @@ function Show-History {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="ZQuick — histórico" Width="580" Height="500" WindowStartupLocation="CenterOwner"
+        WindowStyle="None" ResizeMode="CanResize" AllowsTransparency="True"
         Background="#202024" ShowInTaskbar="False" FontFamily="Segoe UI" FontSize="12">
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="36" ResizeBorderThickness="6" GlassFrameThickness="1"
+                  CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
   <Window.Resources>
     <Style TargetType="Button">
       <Setter Property="Background" Value="#2A2A30"/>
@@ -3272,8 +3277,29 @@ function Show-History {
       <Setter Property="Padding" Value="10,4"/>
       <Setter Property="Cursor" Value="Hand"/>
     </Style>
+    <Style x:Key="ChromeBtn" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#3A3A44"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
   </Window.Resources>
   <DockPanel>
+    <Border DockPanel.Dock="Top" Padding="14,8,4,6">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" x:Name="HistClose" Content="✕" ToolTip="fechar (Esc)" Style="{StaticResource ChromeBtn}"/>
+        <TextBlock Text="🕘 Histórico" FontSize="14" FontWeight="SemiBold" Foreground="#E8E8EC" VerticalAlignment="Center"/>
+      </DockPanel>
+    </Border>
     <Border DockPanel.Dock="Top" Padding="10,8,10,6">
       <TextBox x:Name="Search" Padding="8,8" FontSize="13" ToolTip="filtrar por pergunta ou resposta">
         <TextBox.Style>
@@ -3354,6 +3380,7 @@ function Show-History {
         $hw.Add_ContentRendered({ [void]$hsearch.Focus() }.GetNewClosure())
         Log ("historico: dialogo ({0} itens)" -f $entries.Count)
 
+        $hw.FindName('HistClose').Add_Click({ param($s, $e) $hw.DialogResult = $false }.GetNewClosure())
         $hw.FindName('OkBtn').Add_Click({ param($s, $e)
             $sel = $hlist.SelectedItem
             if ($sel) { Load-Conversation ([string]$sel.Tag); $hw.DialogResult = $true }

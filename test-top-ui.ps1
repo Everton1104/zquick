@@ -4,15 +4,20 @@
 #   fase 3: cursor no centro da janela + Ctrl + roda p/ baixo 2 notchs -> opacidade 80% -> 70%
 #           (log 'opacidade salva 70% (Ctrl+roda)' + json) ; roda p/ cima volta a 80%
 #   fase 4: MESMO Ctrl+roda com o dialogo ⚙ aberto, cursor sobre o dialogo (v3.9.1)
+#   fase 5: PIXEL — fundo vermelho atras da janela a 50% tem que aparecer na captura
+#           (AllowsTransparency=True: Window.Opacity sozinho NAO blendia no Win11+Chrome)
 #   finally: restaura zquick.json original + restart
 # Rodar com: pwsh -STA -File test-top-ui.ps1
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, System.Windows.Forms
 Add-Type -Namespace K -Name I -MemberDefinition @'
 [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int dwData, UIntPtr extra);
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 '@
+[K.I]::SetProcessDPIAware() | Out-Null
 $log = Join-Path $env:TEMP 'zquick.log'
 $cfgFile = Join-Path $PSScriptRoot 'zquick.json'
 $bakFile = Join-Path $env:TEMP 'zquick.tbak.json'
@@ -38,6 +43,7 @@ function Wait-Log([int]$mark, [string]$pattern, [int]$secs) {
     while ((Get-Date) -lt $deadline) {
         try { $new = (Read-LogText).Substring($mark) } catch { $new = '' }
         if ($new -match $pattern) { return $new }
+        [System.Windows.Forms.Application]::DoEvents()   # mantem o formulario vermelho da fase 5 pintado
         Start-Sleep -Milliseconds 500
     }
     return ''
@@ -86,6 +92,25 @@ function Restart-App {
 }
 function Get-IsTopmost($mainWin) {
     $mainWin.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Current.IsTopmost
+}
+function Capture-Stats($r) {
+    # captura a area da janela (rect fisico) e devolve {frac vermelho; brilho medio}
+    $w = [int]$r.Width; $h = [int]$r.Height
+    if ($w -lt 10 -or $h -lt 10) { throw 'rect invalido p/ captura' }
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen([int]$r.Left, [int]$r.Top, 0, 0, $bmp.Size); $g.Dispose()
+    $red = 0; $sum = 0.0; $n = 0
+    $x0 = [int]($w * 0.12); $x1 = [int]($w * 0.88); $y0 = [int]($h * 0.12); $y1 = [int]($h * 0.88)
+    for ($y = $y0; $y -lt $y1; $y += 4) {
+        for ($x = $x0; $x -lt $x1; $x += 4) {
+            $c = $bmp.GetPixel($x, $y)
+            if ($c.R -gt 110 -and $c.G -lt 70 -and $c.B -lt 70) { $red++ }
+            $sum += ($c.R + $c.G + $c.B) / 3.0; $n++
+        }
+    }
+    $bmp.Dispose()
+    [pscustomobject]@{ redFrac = [Math]::Round($red / $n, 3); mean = [Math]::Round($sum / $n, 1) }
 }
 function Get-SettingsWin($mainWin) {
     foreach ($w in @($mainWin.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition))) {
@@ -183,6 +208,34 @@ try {
     Tap 0x1B
     Start-Sleep -Milliseconds 700
     'fase4: voltou a 80% com o ⚙ ainda aberto; Esc fechou o dialogo'
+
+    #### fase 5: pixel — a opacidade e transparencia DE VERDADE? ####
+    $w = Show-Main $app.ProcessId
+    $red = New-Object System.Windows.Forms.Form
+    $red.BackColor = [System.Drawing.Color]::Red
+    $red.FormBorderStyle = 'None'; $red.WindowState = 'Maximized'; $red.ShowInTaskbar = $false
+    $red.Show()
+    for ($i = 0; $i -lt 10; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 60 }
+    [K.I]::SetForegroundWindow([IntPtr]$w.Current.NativeWindowHandle) | Out-Null
+    Start-Sleep -Milliseconds 800
+    try {
+        $r = $w.Current.BoundingRectangle
+        [K.I]::SetCursorPos([int]($r.Left + $r.Width / 2), [int]($r.Top + $r.Height / 2)) | Out-Null
+        Start-Sleep -Milliseconds 200
+        $m = (Read-LogText).Length
+        Send-CtrlWheel -6
+        if (-not (Wait-Log $m 'opacidade salva 50% \(Ctrl\+roda\)' 15)) { throw 'fase5: sem log 50%' }
+        Start-Sleep -Milliseconds 600
+        $st = Capture-Stats ((Get-MainWin $app.ProcessId).Current.BoundingRectangle)
+        "fase5: a 50% contra fundo vermelho -> vermelho=$($st.redFrac) brilho=$($st.mean)"
+        if ($st.redFrac -lt 0.15) { throw "fase5: NAO esta transparente (vermelho=$($st.redFrac)) — AllowsTransparency quebrou?" }
+        'fase5: TRANSPARENTE de verdade — pixel confirma blend com o fundo'
+        $m = (Read-LogText).Length
+        Send-CtrlWheel 6
+        $null = Wait-Log $m 'opacidade salva 80% \(Ctrl\+roda\)' 15
+    } finally {
+        $red.Close(); $red.Dispose()
+    }
 } finally {
     if (Test-Path $bakFile) { Copy-Item $bakFile $cfgFile -Force; Remove-Item $bakFile -Force -Confirm:$false }
     Restart-App

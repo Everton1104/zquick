@@ -28,6 +28,13 @@ function Invoke-Button($win, [string]$name, [string]$label) {
     $btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     "invocado: $label"
 }
+function Get-ChildWin($mainWin, [string]$nameLike) {
+    # dialogo com WindowChrome/Owner aninha como FILHO da janela principal na arvore UIA
+    foreach ($d in @($mainWin.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition))) {
+        if ($d.Current.ControlType -eq [System.Windows.Automation.ControlType]::Window -and $d.Current.Name -like $nameLike) { return $d }
+    }
+    $null
+}
 function Read-New([int]$mark) { try { [IO.File]::ReadAllText($log).Substring($mark) } catch { Start-Sleep -Milliseconds 300; [IO.File]::ReadAllText($log).Substring($mark) } }
 
 # acha o processo do zquick
@@ -64,6 +71,7 @@ $dlg = $null
 $deadline = (Get-Date).AddSeconds(5)
 while (-not $dlg -and (Get-Date) -lt $deadline) {
     $dlg = @(Find-WindowsByProc $app.ProcessId) | Where-Object { $_.Current.Name -like '*histórico*' } | Select-Object -First 1
+    if (-not $dlg) { $dlg = Get-ChildWin $win '*histórico*' }
     if (-not $dlg) { Start-Sleep -Milliseconds 300 }
 }
 if (-not $dlg) { throw 'dialogo nao visivel via UIA' }

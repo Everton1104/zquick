@@ -22,6 +22,6 @@ function Check-Xaml([string]$xaml, [string[]]$names, [string]$rotulo) {
 }
 
 Check-Xaml $main @('ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','TopBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') 'janela principal'
-Check-Xaml $hist @('Search','List','CountText','DelBtn','OkBtn') 'dialogo historico'
+Check-Xaml $hist @('Search','List','CountText','DelBtn','OkBtn','HistClose') 'dialogo historico'
 Check-Xaml $setx @('SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') 'dialogo configuracoes'
 'tudo OK'
