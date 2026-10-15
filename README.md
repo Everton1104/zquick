@@ -90,6 +90,11 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   preservadas
 - **Janela memorizada**: último tamanho e posição voltam no próximo
   abrir (save com debounce; `window.center` = abrir sempre no centro)
+- **📌 Sempre no topo** — botão na barra alterna `Topmost` (persistido
+  em `alwaysOnTop`, com estado visual accent e checkbox no ⚙ → Janela);
+  **Ctrl+roda do mouse** sobre a janela ajusta a opacidade 40–100% em
+  passos de 5% (grava com debounce; a régua do ⚙ continua valendo) —
+  combinação de overlay: pinado e translúcido sobre o trabalho
 - Botão **⏹ Parar** (parcial preservada), **fila de mensagens** durante
   a resposta, retry com backoff 1/3/8s (429/5xx/rede), watchdog de
   stream (120s sem dados corta o turno)
@@ -125,7 +130,8 @@ ou direto no `zquick.json` do perfil.
 | `searchEngine` | `bing` | `zai-server` (server-side, recomendado) · `bing` · `zai` |
 | `promptCache` | `true` | cache_control no system+tools |
 | `hotkey` / `maxTokens` / `hideOnBlur` | `alt+q` / 4096 / false | atalho, teto da resposta, fechar ao perder foco |
-| `windowOpacity` / `theme` | 1.0 / — | opacidade e paleta (15 chaves hex) |
+| `windowOpacity` / `theme` | 1.0 / — | opacidade (Ctrl+roda também ajusta) e paleta (15 chaves hex) |
+| `alwaysOnTop` | `false` | 📌 janela sobre as outras |
 | `window` | 860×600, centro | `width,height,x,y` memorizados + `center` |
 | `answerFont` / `answerFontSize` | — / 13 | fonte do texto; tamanho 13 = 100% — **escala a interface toda** (10–22) |
 | `allow` | — | `runPs` (comandos exatos) e `paths` (pastas) do "✔ Sempre" |
@@ -156,7 +162,8 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   paralelo+MCP (`test-parallel-engine`, `test-mcp-engine` +
   fixture `test-mcp-server.ps1`, `test-par4-ui`), subagente/skills
   (`test-sub-engine` com API real, `test-skills-engine`, `test-wave5-ui`),
-  moldura+⚙ (`test-wave6-ui`), escala de fonte (`test-font-ui`)
+  moldura+⚙ (`test-wave6-ui`), escala de fonte (`test-font-ui`),
+  pin/opacidade (`test-top-ui`)
 
 ## Arquitetura em 1 parágrafo
 
@@ -216,6 +223,7 @@ retomável com imagens.
 | `fd14a10` | Onda 5 — subagente de leitura (`research`, contexto próprio) + skills `.md` (`skill_read`) |
 | `3474ddf` | Onda 6 — menu ⚙ de configurações (4 abas) + moldura customizada — ▢ ✕ + janela memorizada |
 | `7d72eb5` | v3.8 — escala global de fonte: `answerFontSize` move a interface toda (pré-escala no parse + `FSz` + re-escala ao vivo no Aplicar) |
+| `ce02283` | v3.9 — 📌 sempre no topo (persistido) + Ctrl+roda ajusta opacidade ao vivo |
 
 ## Notas de engenharia (lições)
 
@@ -267,5 +275,12 @@ retomável com imagens.
   altura do DockPanel do composer — o SendBtn não crescia com a fonte.
   Dimensões fixas do composer precisam acompanhar a escala em código
   (boot + re-escala), não só os `FontSize`.
+- **Nome de tipo errado em handler = FATAL, não erro pontual**: o enum
+  é `System.Windows.Input.ModifierKeys` ("KeyboardModifiers" não existe
+  — `Unable to find type` estourou no dispatcher no 1º Ctrl+roda e
+  matou o app; o E2E com `mouse_event` real pegou antes do usuário).
+  Roda do mouse é injetável (não é texto — TSF/IME não afeta):
+  `mouse_event(MOUSEEVENTF_WHEEL, …, dwData:int, …)` com `dwData`
+  negativo para baixo, cursor sobre a janela.
 
 Log de diagnóstico: `%TEMP%\zquick.log`.
