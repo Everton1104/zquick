@@ -2992,7 +2992,11 @@ function Show-Settings {
                 <StackPanel Grid.Column="2">
                   <TextBlock Text="visionModel (lê imagem)" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
                   <TextBox x:Name="SetVision" FontFamily="Cascadia Mono, Consolas"/>
-                  <TextBlock Text="modelos (vírgula — caixa do topo)" Foreground="#9A9AA5" FontSize="11" Margin="0,10,0,4"/>
+                  <DockPanel Margin="0,10,0,4">
+                    <Button DockPanel.Dock="Right" x:Name="SetListModels" Content="🔎 listar da API" Margin="6,0,0,0" Padding="8,2" FontSize="11"
+                            ToolTip="Busca a lista de modelos do provedor (GET /v1/models do padrão Anthropic) e preenche a caixa abaixo"/>
+                    <TextBlock Text="modelos (vírgula — caixa do topo)" Foreground="#9A9AA5" FontSize="11" VerticalAlignment="Center"/>
+                  </DockPanel>
                   <TextBox x:Name="SetModels" FontFamily="Cascadia Mono, Consolas"/>
                 </StackPanel>
               </Grid>
@@ -3065,7 +3069,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
@@ -3158,6 +3162,31 @@ function Show-Settings {
 
         $g['SetClose'].Add_Click({ $script:setSW.DialogResult = $false })
         $g['SetCancel'].Add_Click({ $window.Opacity = $script:baseOpacity; $script:setSW.Opacity = $script:baseOpacity })   # desfaz preview
+
+        # v3.10: puxa a lista de modelos do provedor (GET /v1/models do padrao Anthropic) e enche a caixa do topo
+        $g['SetListModels'].Add_Click({
+            try {
+                $script:setG['SetStatus'].Text = '🔎 listando modelos da API…'
+                [void]$script:setSW.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+                $pn = [string]$script:setG['SetProfile'].SelectedItem
+                $p = if ($pn -and $cfg.profiles.$pn) { $cfg.profiles.$pn } else { $cfg.profiles.($cfg.profile) }
+                $auth = Resolve-ProfileAuth $p
+                $nb = [string]$script:setG['SetBase'].Text.Trim()
+                if ($nb) { $auth.base = $nb }
+                $nk = [string]$script:setG['SetKey'].Password
+                if ($nk) { $auth.key = $nk }
+                $r = Invoke-RestMethod -Method Get -Uri ($auth.base.TrimEnd('/') + '/v1/models') `
+                     -Headers @{ 'x-api-key' = $auth.key; 'anthropic-version' = '2023-06-01' } -TimeoutSec 25
+                $ids = @($r.data | ForEach-Object { [string]$_.id } | Where-Object { $_ })
+                if (-not $ids.Count) { throw 'resposta veio sem modelos' }
+                $script:setG['SetModels'].Text = $ids -join ', '
+                $script:setG['SetStatus'].Text = "✔ $($ids.Count) modelos carregados — Aplicar grava"
+                Log ("config: {0} modelos listados da API ({1})" -f $ids.Count, $auth.base)
+            } catch {
+                $script:setG['SetStatus'].Text = '✕ listar: ' + $_.Exception.Message
+                Log ("config: listar modelos falhou: {0}" -f $_.Exception.Message)
+            }
+        })
 
         $g['SetApply'].Add_Click({
             try {
