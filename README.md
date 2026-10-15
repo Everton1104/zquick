@@ -235,6 +235,7 @@ retomável com imagens.
 | `ce02283` | v3.9 — 📌 sempre no topo (persistido) + Ctrl+roda ajusta opacidade ao vivo |
 | `3e3780d` | v3.9.1 — Ctrl+roda vale nas 3 janelas (⚙/histórico abrem na opacidade atual e seguem o preview da régua) |
 | `b34b7e2` | v3.9.2 — transparência REAL: `AllowsTransparency="True"` nas 3 janelas (sem ele `Window.Opacity`+`WindowChrome` só escurecia contra preto); histórico com moldura própria (🕘 + ✕) |
+| `7316214` | v3.9.3 — dica no ⚙ → Perfil: qualquer API no padrão Anthropic serve (`/v1/messages` incluído automaticamente) |
 
 ## Notas de engenharia (lições)
 
