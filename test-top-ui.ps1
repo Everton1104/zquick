@@ -3,6 +3,7 @@
 #   fase 2: clique de novo -> IsTopmost False + json false
 #   fase 3: cursor no centro da janela + Ctrl + roda p/ baixo 2 notchs -> opacidade 80% -> 70%
 #           (log 'opacidade salva 70% (Ctrl+roda)' + json) ; roda p/ cima volta a 80%
+#   fase 4: MESMO Ctrl+roda com o dialogo ⚙ aberto, cursor sobre o dialogo (v3.9.1)
 #   finally: restaura zquick.json original + restart
 # Rodar com: pwsh -STA -File test-top-ui.ps1
 $ErrorActionPreference = 'Stop'
@@ -86,6 +87,12 @@ function Restart-App {
 function Get-IsTopmost($mainWin) {
     $mainWin.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Current.IsTopmost
 }
+function Get-SettingsWin($mainWin) {
+    foreach ($w in @($mainWin.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition))) {
+        if ($w.Current.ControlType -eq [System.Windows.Automation.ControlType]::Window -and $w.Current.Name -like '*configura*') { return $w }
+    }
+    $null
+}
 function Send-CtrlWheel([int]$notches) {
     # cursor no centro da janela; Ctrl pressionado + roda (120/notch)
     [K.I]::keybd_event(0x11,0,0,[UIntPtr]::Zero)
@@ -149,6 +156,33 @@ try {
     $j = Get-Content $cfgFile -Raw | ConvertFrom-Json
     if ([Math]::Abs([double]$j.windowOpacity - 0.8) -gt 0.011) { throw "fase3: json opacity volta = $($j.windowOpacity)" }
     'fase3: Ctrl+roda cima — voltou a 80%'
+
+    #### fase 4: Ctrl+roda com o dialogo ⚙ aberto (cursor SOBRE o dialogo) ####
+    $m = (Read-LogText).Length
+    Invoke-Btn $w 'SettingsBtn'
+    $null = Wait-Log $m 'config: dialogo' 10
+    $sd = $null
+    for ($try = 0; $try -lt 10 -and -not $sd; $try++) {
+        $w = Show-Main $app.ProcessId
+        $sd = Get-SettingsWin $w
+        if (-not $sd) { Start-Sleep -Milliseconds 400 }
+    }
+    if (-not $sd) { throw 'fase4: dialogo ⚙ nao abriu' }
+    $r = $sd.Current.BoundingRectangle
+    $null = [K.I]::SetCursorPos([int]($r.Left + $r.Width / 2), [int]($r.Top + $r.Height / 2))
+    Start-Sleep -Milliseconds 300
+    $m = (Read-LogText).Length
+    Send-CtrlWheel -2
+    if (-not (Wait-Log $m 'opacidade salva 70% \(Ctrl\+roda\)' 15)) { throw "fase4: roda sobre o ⚙ nao salvou: $((Read-LogText).Substring($m) -split "`n" | Select-Object -Last 5)" }
+    $j = Get-Content $cfgFile -Raw | ConvertFrom-Json
+    if ([Math]::Abs([double]$j.windowOpacity - 0.7) -gt 0.011) { throw "fase4: json opacity = $($j.windowOpacity)" }
+    'fase4: Ctrl+roda SOBRE o dialogo ⚙ — 80% -> 70% + json gravado'
+    $m = (Read-LogText).Length
+    Send-CtrlWheel 2
+    if (-not (Wait-Log $m 'opacidade salva 80% \(Ctrl\+roda\)' 15)) { throw 'fase4: sem log 80% (volta)' }
+    Tap 0x1B
+    Start-Sleep -Milliseconds 700
+    'fase4: voltou a 80% com o ⚙ ainda aberto; Esc fechou o dialogo'
 } finally {
     if (Test-Path $bakFile) { Copy-Item $bakFile $cfgFile -Force; Remove-Item $bakFile -Force -Confirm:$false }
     Restart-App

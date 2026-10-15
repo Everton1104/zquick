@@ -2248,7 +2248,7 @@ function Set-Topmost([bool]$on) {
     $StatusText.Text = $(if ($on) { '📌 sempre no topo: sim' } else { '📌 sempre no topo: não' })
     Log ("chrome: topmost {0}" -f $on)
 }
-# Ctrl+roda do mouse sobre a janela: opacidade 40-100% (persiste com debounce)
+# Ctrl+roda do mouse sobre QUALQUER janela do app: opacidade 40-100% (persiste com debounce)
 $script:opacSaveTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:opacSaveTimer.Interval = [TimeSpan]::FromMilliseconds(1200)
 $script:opacSaveTimer.Add_Tick({
@@ -2257,17 +2257,21 @@ $script:opacSaveTimer.Add_Tick({
     Save-Config
     Log ("config: opacidade salva {0:P0} (Ctrl+roda)" -f $script:baseOpacity)
 })
-$window.Add_PreviewMouseWheel({
-    param($s, $e)
-    if (-not ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) { return }
-    $e.Handled = $true
-    $op = [Math]::Min(1.0, [Math]::Max(0.4, [Math]::Round($script:baseOpacity + $(if ($e.Delta -gt 0) { 0.05 } else { -0.05 }), 2)))
-    if ([Math]::Abs($op - $script:baseOpacity) -lt 0.005) { return }
-    $script:baseOpacity = $op
-    $window.Opacity = $op
-    $StatusText.Text = ("opacidade {0:P0} (Ctrl+roda ajusta)" -f $op)
-    if (-not $script:opacSaveTimer.IsEnabled) { $script:opacSaveTimer.Start() }
-})
+function Add-OpacityWheel($win) {
+    $win.Add_PreviewMouseWheel({
+        param($s, $e)
+        if (-not ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) { return }
+        $e.Handled = $true
+        $op = [Math]::Min(1.0, [Math]::Max(0.4, [Math]::Round($script:baseOpacity + $(if ($e.Delta -gt 0) { 0.05 } else { -0.05 }), 2)))
+        if ([Math]::Abs($op - $script:baseOpacity) -lt 0.005) { return }
+        $script:baseOpacity = $op
+        $s.Opacity = $op          # janela que recebeu a roda (principal OU dialogo aberto)
+        $window.Opacity = $op
+        $StatusText.Text = ("opacidade {0:P0} (Ctrl+roda ajusta)" -f $op)
+        if (-not $script:opacSaveTimer.IsEnabled) { $script:opacSaveTimer.Start() }
+    })
+}
+Add-OpacityWheel $window
 
 # ---------- Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta ----------
 try {
@@ -3061,6 +3065,8 @@ function Show-Settings {
         foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
+        Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
+        $sw.Opacity = $script:baseOpacity   # dialogo abre ja na opacidade da janela principal
         # ---- carrega valores atuais ----
         $profNames = @($cfg.profiles.PSObject.Properties.Name)
         $g['SetProfile'].ItemsSource = $profNames
@@ -3136,6 +3142,7 @@ function Show-Settings {
         # ---- preview de opacidade ao vivo ----
         $g['SetOpacity'].Add_ValueChanged({ param($s2, $e2)
             $window.Opacity = $s2.Value
+            $script:setSW.Opacity = $s2.Value
             $script:setG['SetOpVal'].Text = ('{0:P0}' -f $s2.Value)
         })
 
@@ -3147,7 +3154,7 @@ function Show-Settings {
         Log ("config: dialogo (perfis {0})" -f $profNames.Count)
 
         $g['SetClose'].Add_Click({ $script:setSW.DialogResult = $false })
-        $g['SetCancel'].Add_Click({ $window.Opacity = $script:baseOpacity })   # desfaz preview
+        $g['SetCancel'].Add_Click({ $window.Opacity = $script:baseOpacity; $script:setSW.Opacity = $script:baseOpacity })   # desfaz preview
 
         $g['SetApply'].Add_Click({
             try {
@@ -3214,7 +3221,7 @@ function Show-Settings {
 
                 # ---- aplica ao vivo o que dá ----
                 $window.Width = $cfg.window.width; $window.Height = $cfg.window.height
-                $script:baseOpacity = $cfg.windowOpacity; $window.Opacity = $script:baseOpacity
+                $script:baseOpacity = $cfg.windowOpacity; $window.Opacity = $script:baseOpacity; $script:setSW.Opacity = $script:baseOpacity
                 $window.Topmost = [bool]$cfg.alwaysOnTop; Set-TopBtnVisual ([bool]$cfg.alwaysOnTop)
                 # v3.8: fonte re-escala a janela principal TODA ao vivo (dialogos pegam na proxima abertura)
                 try { Set-FontScale ([double]$cfg.answerFontSize / 13.0) } catch { Log "fontscale apply: $_" }
@@ -3310,6 +3317,8 @@ function Show-History {
         $hlist = $hw.FindName('List')
         $hsearch = $hw.FindName('Search')
         $countText = $hw.FindName('CountText')
+        Add-OpacityWheel $hw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
+        $hw.Opacity = $script:baseOpacity   # dialogo abre ja na opacidade da janela principal
         $entries = @()
         foreach ($f in $files) {
             try {
