@@ -75,7 +75,11 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   tamanho do texto (13 = 100%), as 14 cores do tema (swatch ao vivo +
   restaurar padrão), buscador, maxTokens, promptCache, hideOnBlur e
   systemPrompt — aplica na hora o que dá (janela, opacidade, fonte,
-  textos) e recria o engine quando a chave/modelo muda
+  textos) e recria o engine quando a chave/modelo muda; na aba Perfil,
+  **🔎 listar da API** enche a caixa de modelos sozinho (GET `/v1/models`
+  do padrão Anthropic — Z.ai, MiniMax etc.; flash/turbo/air inclusos) e
+  a dica lembra que não precisa ser Claude (GLM, Kimi, DeepSeek, MiniMax
+  e Qwen falam o mesmo padrão)
 - **Escala global de fonte**: o tamanho da aba Aparência move a
   interface TODA, não só as respostas — textarea, menus, diálogos,
   histórico e chips crescem juntos (13 = padrão; 10–22 = 77–169%).
@@ -172,7 +176,7 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   moldura+⚙ (`test-wave6-ui`), escala de fonte (`test-font-ui`),
   pin/opacidade incluindo Ctrl+roda sobre o ⚙ aberto e **prova de
   pixel** da transparência real (`test-top-ui`), histórico com moldura
-  nova (`test-histbtn-ui`)
+  nova (`test-histbtn-ui`), listar modelos da API (`test-models-ui`)
 
 ## Arquitetura em 1 parágrafo
 
@@ -237,6 +241,7 @@ retomável com imagens.
 | `b34b7e2` | v3.9.2 — transparência REAL: `AllowsTransparency="True"` nas 3 janelas (sem ele `Window.Opacity`+`WindowChrome` só escurecia contra preto); histórico com moldura própria (🕘 + ✕) |
 | `7316214` | v3.9.3 — dica no ⚙ → Perfil: qualquer API no padrão Anthropic serve (`/v1/messages` incluído automaticamente) |
 | `7614860` | v3.9.4 — dica reformulada: "não precisa ser Claude" em destaque + exemplos de Base URL (Z.ai, Kimi, DeepSeek, MiniMax) |
+| `f18baf1` | v3.10 — 🔎 listar da API no ⚙ → Perfil: puxa `GET /v1/models` do provedor e enche a caixa de modelos (flash/turbo inclusos) |
 
 ## Notas de engenharia (lições)
 
