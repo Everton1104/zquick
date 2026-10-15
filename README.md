@@ -77,9 +77,11 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   systemPrompt — aplica na hora o que dá (janela, opacidade, fonte,
   textos) e recria o engine quando a chave/modelo muda; na aba Perfil,
   **🔎 listar da API** enche a caixa de modelos sozinho (GET `/v1/models`
-  do padrão Anthropic — Z.ai, MiniMax etc.; flash/turbo/air inclusos) e
-  a dica lembra que não precisa ser Claude (GLM, Kimi, DeepSeek, MiniMax
-  e Qwen falam o mesmo padrão)
+  do padrão Anthropic — Z.ai, MiniMax etc.; flash/turbo/air inclusos)
+  com **⭐ no recomendado** (maior modelo "cheio", se existir — a
+  estrela é só exibição: `Clean-ModelId` tira antes de qualquer chamada
+  à API) e a dica lembra que não precisa ser Claude (GLM, Kimi,
+  DeepSeek, MiniMax e Qwen falam o mesmo padrão)
 - **Escala global de fonte**: o tamanho da aba Aparência move a
   interface TODA, não só as respostas — textarea, menus, diálogos,
   histórico e chips crescem juntos (13 = padrão; 10–22 = 77–169%).
@@ -242,6 +244,7 @@ retomável com imagens.
 | `7316214` | v3.9.3 — dica no ⚙ → Perfil: qualquer API no padrão Anthropic serve (`/v1/messages` incluído automaticamente) |
 | `7614860` | v3.9.4 — dica reformulada: "não precisa ser Claude" em destaque + exemplos de Base URL (Z.ai, Kimi, DeepSeek, MiniMax) |
 | `f18baf1` | v3.10 — 🔎 listar da API no ⚙ → Perfil: puxa `GET /v1/models` do provedor e enche a caixa de modelos (flash/turbo inclusos) |
+| `928c728` | v3.10.1 — ⭐ recomendado na lista (maior modelo cheio); estrela fica só na exibição (`Clean-ModelId` limpa pra API) |
 
 ## Notas de engenharia (lições)
 
