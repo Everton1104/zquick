@@ -72,10 +72,17 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
 - **⚙ Configurações** dentro do app (4 abas: Perfil & chaves / Janela /
   Aparência / Geral): chave de API por perfil (PasswordBox), modelos,
   largura/altura/centralização, régua de opacidade 40–100%, fonte e
-  tamanho do texto das respostas, as 14 cores do tema (swatch ao vivo +
+  tamanho do texto (13 = 100%), as 14 cores do tema (swatch ao vivo +
   restaurar padrão), buscador, maxTokens, promptCache, hideOnBlur e
   systemPrompt — aplica na hora o que dá (janela, opacidade, fonte,
   textos) e recria o engine quando a chave/modelo muda
+- **Escala global de fonte**: o tamanho da aba Aparência move a
+  interface TODA, não só as respostas — textarea, menus, diálogos,
+  histórico e chips crescem juntos (13 = padrão; 10–22 = 77–169%).
+  XAML é pré-escalado no parse (`Theme-Xaml`), elementos criados via
+  código usam `FSz()`, e o Aplicar re-escala a janela principal **ao
+  vivo** (walk visual + documento; diálogo ⚙ e histórico pegam na
+  próxima abertura)
 - **Moldura customizada** (`WindowStyle=None` + `WindowChrome`):
   botões próprios **— ▢ ✕** — — e ✕ ocultam para a bandeja (saída real
   no menu do tray), ▢ maximiza/restaura, duplo clique no topo maximiza;
@@ -120,7 +127,7 @@ ou direto no `zquick.json` do perfil.
 | `hotkey` / `maxTokens` / `hideOnBlur` | `alt+q` / 4096 / false | atalho, teto da resposta, fechar ao perder foco |
 | `windowOpacity` / `theme` | 1.0 / — | opacidade e paleta (15 chaves hex) |
 | `window` | 860×600, centro | `width,height,x,y` memorizados + `center` |
-| `answerFont` / `answerFontSize` | — / 13 | fonte do texto das respostas |
+| `answerFont` / `answerFontSize` | — / 13 | fonte do texto; tamanho 13 = 100% — **escala a interface toda** (10–22) |
 | `allow` | — | `runPs` (comandos exatos) e `paths` (pastas) do "✔ Sempre" |
 | `mcpServers` | — | `{ nome: { command, args[] } }` — servidores MCP stdio (tools viram `mcp_*`) |
 | `profiles.{nome}` | — | `label, baseUrl, apiKey, fastModel, bigModel, visionModel, models[]` |
@@ -149,7 +156,7 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   paralelo+MCP (`test-parallel-engine`, `test-mcp-engine` +
   fixture `test-mcp-server.ps1`, `test-par4-ui`), subagente/skills
   (`test-sub-engine` com API real, `test-skills-engine`, `test-wave5-ui`),
-  moldura+⚙ (`test-wave6-ui`)
+  moldura+⚙ (`test-wave6-ui`), escala de fonte (`test-font-ui`)
 
 ## Arquitetura em 1 parágrafo
 
@@ -208,6 +215,7 @@ retomável com imagens.
 | `7bd4b0e` | Onda 4 — tools de leitura em paralelo (ordem preservada), cliente MCP stdio (`mcpServers`) |
 | `fd14a10` | Onda 5 — subagente de leitura (`research`, contexto próprio) + skills `.md` (`skill_read`) |
 | `3474ddf` | Onda 6 — menu ⚙ de configurações (4 abas) + moldura customizada — ▢ ✕ + janela memorizada |
+| `7d72eb5` | v3.8 — escala global de fonte: `answerFontSize` move a interface toda (pré-escala no parse + `FSz` + re-escala ao vivo no Aplicar) |
 
 ## Notas de engenharia (lições)
 
@@ -247,5 +255,17 @@ retomável com imagens.
 - **`$script:` + `GetNewClosure` não se misturam** (o `$script:`
   resolve no módulo da closure → null): handlers usam scriptblocks
   simples com estado compartilhado em variáveis `$script:set*`.
+- **Escala de UI = multiplicar `FontSize`, não `LayoutTransform`**: o
+  dropdown de ComboBox mora num HWND separado (Popup) e não herda
+  transform do ancestral — mas herda `FontSize` por propriedade, então
+  escalar o valor escala o popup junto. E cada tipo tem **seu próprio
+  DP** de FontSize (`Control` / `TextBlock` / `TextElement` /
+  `FlowDocument` — `AddOwner` cria outro identificador): um walk de
+  re-escala ao vivo tem que ler o local value com o identificador do
+  tipo concreto, senão `TextBlock` fica para trás.
+- **Altura fixa prende a linha**: `InputBox Height="68"` definia a
+  altura do DockPanel do composer — o SendBtn não crescia com a fonte.
+  Dimensões fixas do composer precisam acompanhar a escala em código
+  (boot + re-escala), não só os `FontSize`.
 
 Log de diagnóstico: `%TEMP%\zquick.log`.
