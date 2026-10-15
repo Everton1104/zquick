@@ -94,7 +94,10 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
   em `alwaysOnTop`, com estado visual accent e checkbox no ⚙ → Janela);
   **Ctrl+roda do mouse** sobre a janela ajusta a opacidade 40–100% em
   passos de 5% (grava com debounce; a régua do ⚙ continua valendo) —
-  combinação de overlay: pinado e translúcido sobre o trabalho
+  combinação de overlay: pinado e translúcido sobre o trabalho. O
+  Ctrl+roda funciona sobre **qualquer janela do app** (⚙ e histórico
+  inclusos, que também abrem já na opacidade atual e acompanham o
+  preview da régua)
 - Botão **⏹ Parar** (parcial preservada), **fila de mensagens** durante
   a resposta, retry com backoff 1/3/8s (429/5xx/rede), watchdog de
   stream (120s sem dados corta o turno)
@@ -163,7 +166,7 @@ para o git; sem ela, o `.ps1` continua sendo o app completo.
   fixture `test-mcp-server.ps1`, `test-par4-ui`), subagente/skills
   (`test-sub-engine` com API real, `test-skills-engine`, `test-wave5-ui`),
   moldura+⚙ (`test-wave6-ui`), escala de fonte (`test-font-ui`),
-  pin/opacidade (`test-top-ui`)
+  pin/opacidade incluindo Ctrl+roda sobre o ⚙ aberto (`test-top-ui`)
 
 ## Arquitetura em 1 parágrafo
 
@@ -224,6 +227,7 @@ retomável com imagens.
 | `3474ddf` | Onda 6 — menu ⚙ de configurações (4 abas) + moldura customizada — ▢ ✕ + janela memorizada |
 | `7d72eb5` | v3.8 — escala global de fonte: `answerFontSize` move a interface toda (pré-escala no parse + `FSz` + re-escala ao vivo no Aplicar) |
 | `ce02283` | v3.9 — 📌 sempre no topo (persistido) + Ctrl+roda ajusta opacidade ao vivo |
+| `3e3780d` | v3.9.1 — Ctrl+roda vale nas 3 janelas (⚙/histórico abrem na opacidade atual e seguem o preview da régua) |
 
 ## Notas de engenharia (lições)
 
