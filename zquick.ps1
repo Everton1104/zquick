@@ -42,6 +42,7 @@ $cfg = @{
     hideOnBlur    = $false
     systemPrompt  = $null
     windowOpacity = 1.0
+    alwaysOnTop   = $false    # v3.9: 📌 janela sobre as outras
     # Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta
     window        = @{ width = 860; height = 600; x = $null; y = $null; center = $true }
     answerFont    = $null      # null = Cascadia Mono (padrão)
@@ -64,7 +65,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','answerFont','answerFontSize','mcpServers')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','answerFont','answerFontSize','mcpServers')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.window) {
@@ -127,7 +128,7 @@ function Save-Config {
         $out = [ordered]@{
             profile = $cfg.profile; model = $cfg.model; hotkey = $cfg.hotkey; maxTokens = $cfg.maxTokens
             searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
-            systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity
+            systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
             window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
             theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
@@ -2138,6 +2139,7 @@ $xamlStr = @'
           <Button x:Name="CopyBtn" Content="Copiar" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <Button x:Name="TopBtn" Content="📌" Margin="8,0,0,0" ToolTip="sempre no topo — manter a janela sobre as outras" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="SettingsBtn" Content="⚙" Margin="14,0,0,0" ToolTip="Configurações — chaves, janela, aparência, geral" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MinBtn" Content="—" ToolTip="ocultar na bandeja (Alt+Q traz de volta)" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MaxBtn" Content="▢" ToolTip="maximizar / restaurar" Style="{StaticResource ChromeBtn}"/>
@@ -2222,7 +2224,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','TopBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -2230,6 +2232,42 @@ if ($cfg.windowOpacity -and [double]$cfg.windowOpacity -gt 0 -and [double]$cfg.w
     $script:baseOpacity = [double]$cfg.windowOpacity
     $window.Opacity = $script:baseOpacity
 }
+
+# ---------- v3.9: 📌 sempre no topo + Ctrl+roda = opacidade ao vivo ----------
+function Set-TopBtnVisual([bool]$on) {
+    $TopBtn.Background = $(if ($on) { $T.accent } else { $T.panel })
+    $TopBtn.ToolTip = $(if ($on) { 'sempre no topo: ATIVO — clique para desligar' } else { 'sempre no topo — manter a janela sobre as outras' })
+}
+if ($cfg.alwaysOnTop) { $window.Topmost = $true; Set-TopBtnVisual $true }
+$TopBtn.Add_Click({ Set-Topmost (-not $window.Topmost) })
+function Set-Topmost([bool]$on) {
+    $window.Topmost = $on
+    $cfg.alwaysOnTop = $on
+    Set-TopBtnVisual $on
+    Save-Config
+    $StatusText.Text = $(if ($on) { '📌 sempre no topo: sim' } else { '📌 sempre no topo: não' })
+    Log ("chrome: topmost {0}" -f $on)
+}
+# Ctrl+roda do mouse sobre a janela: opacidade 40-100% (persiste com debounce)
+$script:opacSaveTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:opacSaveTimer.Interval = [TimeSpan]::FromMilliseconds(1200)
+$script:opacSaveTimer.Add_Tick({
+    $script:opacSaveTimer.Stop()
+    $cfg.windowOpacity = $script:baseOpacity
+    Save-Config
+    Log ("config: opacidade salva {0:P0} (Ctrl+roda)" -f $script:baseOpacity)
+})
+$window.Add_PreviewMouseWheel({
+    param($s, $e)
+    if (-not ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) { return }
+    $e.Handled = $true
+    $op = [Math]::Min(1.0, [Math]::Max(0.4, [Math]::Round($script:baseOpacity + $(if ($e.Delta -gt 0) { 0.05 } else { -0.05 }), 2)))
+    if ([Math]::Abs($op - $script:baseOpacity) -lt 0.005) { return }
+    $script:baseOpacity = $op
+    $window.Opacity = $op
+    $StatusText.Text = ("opacidade {0:P0} (Ctrl+roda ajusta)" -f $op)
+    if (-not $script:opacSaveTimer.IsEnabled) { $script:opacSaveTimer.Start() }
+})
 
 # ---------- Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta ----------
 try {
@@ -2966,7 +3004,8 @@ function Show-Settings {
               <TextBox x:Name="SetH" Width="80" FontFamily="Cascadia Mono, Consolas"/>
             </StackPanel>
             <CheckBox x:Name="SetCenter" Content="centralizar ao abrir (desmarcado = reabrir na última posição)" Foreground="#E8E8EC" Margin="0,14,0,0"/>
-            <TextBlock Text="Opacidade" Foreground="#9A9AA5" FontSize="11" Margin="0,16,0,2"/>
+            <CheckBox x:Name="SetTop" Content="sempre no topo (janela sobre as outras; 📌 na barra também alterna)" Foreground="#E8E8EC" Margin="0,10,0,0"/>
+            <TextBlock Text="Opacidade (também ajustável com Ctrl+roda do mouse na janela)" Foreground="#9A9AA5" FontSize="11" Margin="0,16,0,2"/>
             <StackPanel Orientation="Horizontal">
               <Slider x:Name="SetOpacity" Width="260" Minimum="0.4" Maximum="1.0" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
               <TextBlock x:Name="SetOpVal" Foreground="#E8E8EC" FontSize="12" VerticalAlignment="Center" Margin="10,0,0,0"/>
@@ -3019,7 +3058,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetW','SetH','SetCenter','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         # ---- carrega valores atuais ----
@@ -3034,6 +3073,7 @@ function Show-Settings {
         $g['SetW'].Text = [string][int]$cfg.window.width
         $g['SetH'].Text = [string][int]$cfg.window.height
         $g['SetCenter'].IsChecked = [bool]$cfg.window.center
+        $g['SetTop'].IsChecked = [bool]$cfg.alwaysOnTop
         $op0 = [double]$cfg.windowOpacity; if ($op0 -le 0 -or $op0 -gt 1) { $op0 = 1.0 }
         $g['SetOpacity'].Value = $op0
         $g['SetOpVal'].Text = ('{0:P0}' -f $op0)
@@ -3133,6 +3173,7 @@ function Show-Settings {
                 if (-not [int]::TryParse($script:setG['SetH'].Text.Trim(), [ref]$hv) -or $hv -lt 360 -or $hv -gt 2160) { $bad += 'altura (360-2160)' }
                 if ($bad.Count -eq 0) { $cfg.window.width = $wv; $cfg.window.height = $hv }
                 $cfg.window.center = [bool]$script:setG['SetCenter'].IsChecked
+                $cfg.alwaysOnTop = [bool]$script:setG['SetTop'].IsChecked
                 $opv = [double]$script:setG['SetOpacity'].Value
                 $cfg.windowOpacity = $opv
                 # aparencia
@@ -3174,6 +3215,7 @@ function Show-Settings {
                 # ---- aplica ao vivo o que dá ----
                 $window.Width = $cfg.window.width; $window.Height = $cfg.window.height
                 $script:baseOpacity = $cfg.windowOpacity; $window.Opacity = $script:baseOpacity
+                $window.Topmost = [bool]$cfg.alwaysOnTop; Set-TopBtnVisual ([bool]$cfg.alwaysOnTop)
                 # v3.8: fonte re-escala a janela principal TODA ao vivo (dialogos pegam na proxima abertura)
                 try { Set-FontScale ([double]$cfg.answerFontSize / 13.0) } catch { Log "fontscale apply: $_" }
                 try { $AnswerDoc.FontFamily = [System.Windows.Media.FontFamily]::new([string]$cfg.answerFont) } catch {}
