@@ -2008,12 +2008,15 @@ function Get-ActiveProfile {
     if (-not $cfg.profiles.$n) { $n = Get-ProfileNames | Select-Object -First 1 }
     $cfg.profiles.$n
 }
+# v3.10: a lista de modelos pode carregar "⭐" de recomendado no fim (só exibição) —
+# o id limpo (sem estrela) é o que vai pra API
+function Clean-ModelId([string]$m) { ([string]$m).Trim() -replace '\s*⭐\s*$','' }
 function New-EngineFromProfile {
     $p = Get-ActiveProfile
     $auth = Resolve-ProfileAuth $p
     $model = [string]$cfg.model
     if (-not $model) { $model = 'auto' }
-    $models = @(); foreach ($m in @($p.models)) { $models += [string]$m }
+    $models = @(); foreach ($m in @($p.models)) { $models += (Clean-ModelId $m) }
     if ($models -notcontains $model) { $model = 'auto'; if ($models -notcontains 'auto' -and $models.Count -gt 0) { $model = $models[0] } }
     $eng = [ZQuick.Engine]::new($auth.base, $auth.key, $model,
         [string]$p.fastModel, [string]$p.bigModel,
@@ -3179,9 +3182,13 @@ function Show-Settings {
                      -Headers @{ 'x-api-key' = $auth.key; 'anthropic-version' = '2023-06-01' } -TimeoutSec 25
                 $ids = @($r.data | ForEach-Object { [string]$_.id } | Where-Object { $_ })
                 if (-not $ids.Count) { throw 'resposta veio sem modelos' }
-                $script:setG['SetModels'].Text = $ids -join ', '
-                $script:setG['SetStatus'].Text = "✔ $($ids.Count) modelos carregados — Aplicar grava"
-                Log ("config: {0} modelos listados da API ({1})" -f $ids.Count, $auth.base)
+                # ⭐ recomendado = maior versão ENTRE os "cheios" (sem sufixo flash/turbo/air/mini/lite/preview), se existir
+                $rec = @($ids | Where-Object { $_ -notmatch '(?i)flash|turbo|air|mini|lite|preview|thinking' } |
+                    Sort-Object { $v = ($_ -replace '[^0-9.]','').Trim('.'); try { [version]$v } catch { [version]'0.0' } })[-1]
+                $disp = @($ids | ForEach-Object { if ($rec -and $_ -eq $rec) { "$_ ⭐" } else { $_ } })
+                $script:setG['SetModels'].Text = $disp -join ', '
+                $script:setG['SetStatus'].Text = $(if ($rec) { "✔ $($ids.Count) modelos — ⭐ recomendado: $rec (Aplicar grava)" } else { "✔ $($ids.Count) modelos carregados — Aplicar grava" })
+                Log ("config: {0} modelos listados da API ({1}){2}" -f $ids.Count, $auth.base, $(if ($rec) { " — ⭐ $rec" } else { '' }))
             } catch {
                 $script:setG['SetStatus'].Text = '✕ listar: ' + $_.Exception.Message
                 Log ("config: listar modelos falhou: {0}" -f $_.Exception.Message)
@@ -3906,14 +3913,18 @@ function Update-ModelBox {
     $ModelBox.ItemsSource = $items
     $cur = [string]$cfg.model; if (-not $cur) { $cur = 'auto' }
     $sel = if ($cur -eq 'auto') { 'auto (rápida⇄forte)' } else { $cur }
-    if ($items -notcontains $sel) { $sel = $items[0] }
+    if ($items -notcontains $sel) {
+        # pode estar guardado com a estrela de recomendado — casa pelo id limpo
+        $st = @($items | Where-Object { (Clean-ModelId $_) -eq $cur })
+        if ($st.Count) { $sel = $st[0] } else { $sel = $items[0] }
+    }
     $ModelBox.SelectedItem = $sel
     $script:modelLabel = $sel
     Update-CtxMeter
 }
 $ModelBox.Add_SelectionChanged({
     $sel = [string]$ModelBox.SelectedItem
-    $m = if ($sel -eq 'auto (rápida⇄forte)') { 'auto' } else { $sel }
+    $m = if ($sel -eq 'auto (rápida⇄forte)') { 'auto' } else { (Clean-ModelId $sel) }
     $cfg.model = $m; Save-Config
     if ($null -ne $script:engine) { $script:engine.SetModel($m) }
     $script:modelLabel = $sel
