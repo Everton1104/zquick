@@ -2975,7 +2975,9 @@ function Show-Settings {
               <TextBlock Text="Chave da API — cole uma nova para trocar (vazio = mantém a atual/herdada)" Foreground="#9A9AA5" FontSize="11" Margin="0,12,0,4"/>
               <PasswordBox x:Name="SetKey" FontFamily="Cascadia Mono, Consolas"/>
               <TextBlock Text="Base URL (vazio = herda de ~/.claude/settings.json)" Foreground="#9A9AA5" FontSize="11" Margin="0,10,0,4"/>
-              <TextBox x:Name="SetBase" FontFamily="Cascadia Mono, Consolas"/>
+              <TextBox x:Name="SetBase" FontFamily="Cascadia Mono, Consolas"
+                       ToolTip="Endpoint base da API. O app chama &lt;base&gt;/v1/messages — o padrão Anthropic Messages. Serve qualquer provedor/gateway compatível."/>
+              <TextBlock Text="✓ Qualquer API de LLM no padrão Anthropic serve: o /v1/messages é incluído automaticamente (ex.: https://api.anthropic.com · https://api.z.ai/api/anthropic)" Foreground="#6E6E7A" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
               <Grid Margin="0,12,0,0">
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
