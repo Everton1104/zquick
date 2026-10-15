@@ -83,6 +83,13 @@ function Reload-Config {
     } catch { Log "config invalido, usando defaults: $_" }
 }
 Reload-Config
+# ---------- escala global de fonte: answerFontSize 13 = 100% (multiplica a interface TODA) ----------
+$script:fscale = 1.0
+try {
+    $fs0 = [double]$cfg.answerFontSize
+    if ($fs0 -ge 10 -and $fs0 -le 22) { $script:fscale = $fs0 / 13.0 }
+} catch {}
+function FSz([double]$base) { [Math]::Round($base * $script:fscale, 1) }   # tamanho de fonte escalado
 # ---------- tema (cores) — defaults = visual ZQuick escuro; secao "theme" do json sobrescreve ----------
 $T = @{
     bg     = '#202024'; card = '#26262B'; panel = '#2A2A30'; input = '#16161A'; border = '#3A3A44'
@@ -96,12 +103,19 @@ $themeDefaults = $T.Clone()   # Onda 6: base p/ "restaurar cores padrão" no di�
 if ($cfg.theme) {
     foreach ($k in @($cfg.theme.PSObject.Properties.Name)) { if ($T.ContainsKey($k)) { $T[$k] = [string]$cfg.theme.$k } }
 }
-# aplica cores do tema sobre os literais dos XAML (janela + dialogos) antes do parse
+# aplica cores do tema sobre os literais dos XAML (janela + dialogos) antes do parse;
+# v3.8: tambem multiplica todo FontSize="N" pela escala global (13 = 100%)
 function Theme-Xaml([string]$x) {
     foreach ($pair in @(
         @('#202024', $T.bg), @('#2A2A30', $T.panel), @('#16161A', $T.input), @('#3A3A44', $T.border),
         @('#E8E8EC', $T.fg), @('#9A9AA5', $T.status), @('#6E6E7A', $T.dim)
     )) { $x = $x.Replace($pair[0], $pair[1]) }
+    if ([Math]::Abs($script:fscale - 1.0) -gt 0.001) {
+        $me = [System.Text.RegularExpressions.MatchEvaluator]{ param($m)
+            'FontSize="' + [Math]::Round([double]$m.Groups[1].Value * $script:fscale, 1) + '"'
+        }
+        $x = [regex]::Replace($x, 'FontSize="(\d+(?:\.\d+)?)"', $me)
+    }
     $x
 }
 function HexTo-DrawColor([string]$h) {
@@ -2083,7 +2097,7 @@ $xamlStr = @'
         Title="ZQuick — busca rápida" Width="860" Height="600" MinWidth="520" MinHeight="360"
         WindowStyle="None" ResizeMode="CanResize"
         WindowStartupLocation="CenterScreen" ShowInTaskbar="False"
-        Background="#202024" UseLayoutRounding="True" FontFamily="Segoe UI">
+        Background="#202024" UseLayoutRounding="True" FontFamily="Segoe UI" FontSize="12">
   <!-- Onda 6: moldura própria — a faixa do topo vira a "caption" (arrastável);
        bordas de resize/snap continuam do sistema via WindowChrome -->
   <WindowChrome.WindowChrome>
@@ -2232,8 +2246,53 @@ try {
         $window.Top  = [Math]::Max($vyT, [Math]::Min([double]$cfg.window.y, $vyB - 40))
     }
 } catch { Log "boot-janela: $_" }
-if ($cfg.answerFontSize) { try { $AnswerDoc.FontSize = [double]$cfg.answerFontSize } catch {} }
+# v3.8: fonte escala a interface TODA — o XAML ja vem pre-escalado pelo Theme-Xaml (FSz p/ o criado via codigo)
 if ($cfg.answerFont)     { try { $AnswerDoc.FontFamily = [System.Windows.Media.FontFamily]::new([string]$cfg.answerFont) } catch {} }
+$InputBox.Height = FSz 68          # altura fixa do composer escala junto (senao o textarea espreme o texto maior)
+$AttachScroll.MaxHeight = FSz 76
+
+# v3.8: re-escala AO VIVO a janela principal (walk visual + conteudo do documento):
+# todo elemento com FontSize local (do XAML pre-escalado ou FSz no codigo) e' re-multiplicado por novo/velho
+function Set-FontScale([double]$newScale) {
+    if ($newScale -lt 0.5 -or $newScale -gt 2.5) { return }
+    $old = $script:fscale
+    if ([Math]::Abs($newScale - $old) -lt 0.005) { return }
+    $f = $newScale / $old
+    $script:fscale = $newScale
+    $InputBox.Height = [Math]::Round(68 * $newScale, 1)       # composer acompanha (fixa no XAML, fora do walk)
+    $AttachScroll.MaxHeight = [Math]::Round(76 * $newScale, 1)
+    $ctrlProp = [System.Windows.Controls.Control]::FontSizeProperty
+    $tbProp   = [System.Windows.Controls.TextBlock]::FontSizeProperty
+    $txtProp  = [System.Windows.Documents.TextElement]::FontSizeProperty
+    $docProp  = [System.Windows.Documents.FlowDocument]::FontSizeProperty
+    $rescale = {
+        param($e)
+        if ($null -eq $e) { return }
+        $p = $null
+        if     ($e -is [System.Windows.Controls.Control])         { $p = $ctrlProp }
+        elseif ($e -is [System.Windows.Controls.TextBlock])       { $p = $tbProp }
+        elseif ($e -is [System.Windows.Documents.FlowDocument])   { $p = $docProp }
+        elseif ($e -is [System.Windows.Documents.TextElement])    { $p = $txtProp }
+        if ($p) {
+            $lv = $e.ReadLocalValue($p)
+            if ($lv -is [double]) { try { $e.SetValue($p, [Math]::Round([double]$lv * $f, 1)) } catch {} }
+        }
+        if ($e -is [System.Windows.Media.Visual]) {
+            $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($e)
+            for ($i = 0; $i -lt $n; $i++) { & $rescale ([System.Windows.Media.VisualTreeHelper]::GetChild($e, $i)) }
+        }
+        if ($e -is [System.Windows.Documents.FlowDocument])   { foreach ($b in @($e.Blocks))  { & $rescale $b } }
+        elseif ($e -is [System.Windows.Documents.List])       { foreach ($li in @($e.ListItems)) { foreach ($b in @($li.Blocks)) { & $rescale $b } } }
+        elseif ($e -is [System.Windows.Documents.Paragraph])  { foreach ($il in @($e.Inlines)) { & $rescale $il } }
+        elseif ($e -is [System.Windows.Documents.Span])       { foreach ($il in @($e.Inlines)) { & $rescale $il } }
+        elseif ($e -is [System.Windows.Documents.InlineUIContainer]) { & $rescale $e.Child }
+    }
+    try {
+        & $rescale $window            # controles: botoes, menus, textarea, status...
+        & $rescale $AnswerDoc         # paragrafos/runs do documento (titulos, rotulos de tool)
+        Log ("fontscale: {0:P0} -> {1:P0}" -f $old, $newScale)
+    } catch { Log "fontscale erro: $_" }
+}
 
 # redimensionar/mover salva (com atraso p/ não escrever a cada pixel); só normal+visível
 function Save-WindowPos {
@@ -2322,7 +2381,7 @@ function Add-MdLines([System.Windows.Documents.BlockCollection]$blocks, [string]
         if ($question) { $para.Foreground = $T.q; $para.FontWeight = 'SemiBold' }
         else { $para.Foreground = $T.fg }
         $line = $ln
-        if ($line -match '^(#{1,4})\s+(.*)$') { $line = $Matches[2]; $para.FontWeight = 'SemiBold'; $para.FontSize = 14 }
+        if ($line -match '^(#{1,4})\s+(.*)$') { $line = $Matches[2]; $para.FontWeight = 'SemiBold'; $para.FontSize = (FSz 14) }
         if ($line -match '^[-*]\s+') {
             $b = [System.Windows.Documents.Run]::new('• '); $b.Foreground = $T.dim; $para.Inlines.Add($b) | Out-Null
             $line = $line -replace '^[-*]\s+', ''
@@ -2338,7 +2397,7 @@ function New-Card([string]$title) {
     if ($title) {
         $t = [System.Windows.Documents.Paragraph]::new()
         $null = $t.Inlines.Add([System.Windows.Documents.Run]::new($title))
-        $t.FontSize = 10; $t.Foreground = '#6E6E7A'; $t.Margin = '0,0,0,4'
+        $t.FontSize = (FSz 10); $t.Foreground = '#6E6E7A'; $t.Margin = '0,0,0,4'
         $sec.Blocks.Add($t) | Out-Null
     }
     @{ Section = $sec; Blocks = $sec.Blocks }
@@ -2486,7 +2545,7 @@ function Add-ImageAttachment([System.Windows.Media.Imaging.BitmapSource]$bmp) {
         $img = [System.Windows.Controls.Image]::new(); $img.Source = $src; $img.MaxWidth = 84; $img.MaxHeight = 56; $img.Stretch = 'Uniform'; $img.Margin = '2'
         $sp.Children.Add($img) | Out-Null
         $idx = $script:attachments.Count - 1
-        $xb = [System.Windows.Controls.Button]::new(); $xb.Content = '✕'; $xb.Padding = '4,2'; $xb.Margin = '2'; $xb.FontSize = 10
+        $xb = [System.Windows.Controls.Button]::new(); $xb.Content = '✕'; $xb.Padding = '4,2'; $xb.Margin = '2'; $xb.FontSize = (FSz 10)
         $xb.Add_Click({ param($s, $e)
             $script:attachments.RemoveAt($idx)
             $AttachPanel.Children.Remove($chip)
@@ -2505,11 +2564,11 @@ function New-FileChip([string]$name) {
     $chip.Background = $T.input; $chip.BorderBrush = $T.border; $chip.BorderThickness = '1'; $chip.CornerRadius = '6'; $chip.Margin = '0,0,6,0'; $chip.Padding = '4,3'
     $sp = [System.Windows.Controls.StackPanel]::new(); $sp.Orientation = 'Horizontal'
     $tb = [System.Windows.Controls.TextBlock]::new()
-    $tb.Text = "📄 $name"; $tb.Foreground = $T.fg; $tb.FontSize = 11
+    $tb.Text = "📄 $name"; $tb.Foreground = $T.fg; $tb.FontSize = (FSz 11)
     $tb.MaxWidth = 180; $tb.TextTrimming = 'CharacterEllipsis'; $tb.Margin = '4,0,0,0'; $tb.VerticalAlignment = 'Center'
     $sp.Children.Add($tb) | Out-Null
     $idx = $script:attachments.Count - 1
-    $xb = [System.Windows.Controls.Button]::new(); $xb.Content = '✕'; $xb.Padding = '4,2'; $xb.Margin = '2'; $xb.FontSize = 10
+    $xb = [System.Windows.Controls.Button]::new(); $xb.Content = '✕'; $xb.Padding = '4,2'; $xb.Margin = '2'; $xb.FontSize = (FSz 10)
     $xb.Add_Click({ param($s, $e)
         $script:attachments.RemoveAt($idx)
         $AttachPanel.Children.Remove($chip)
@@ -2700,7 +2759,7 @@ function Add-Placeholder {
     Add-MdLines $c.Blocks "Pergunte qualquer coisa — ou cole arquivos com **Ctrl+V** (print, PDF, documento, código)." $false
     $hint = [System.Windows.Documents.Paragraph]::new()
     $null = $hint.Inlines.Add([System.Windows.Documents.Run]::new(("$([string]$cfg.hotkey) mostra/oculta • Enter envia • Shift+Enter quebra linha • Esc fecha a conversa")))
-    $hint.Foreground = $T.dim; $hint.FontSize = 11; $hint.Margin = '0,4,0,0'
+    $hint.Foreground = $T.dim; $hint.FontSize = (FSz 11); $hint.Margin = '0,4,0,0'
     $c.Blocks.Add($hint) | Out-Null
     $AnswerDoc.Blocks.Add($c.Section) | Out-Null
 }
@@ -2820,7 +2879,7 @@ function Show-Settings {
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="ZQuick — configurações" Width="640" Height="600" MinWidth="520" MinHeight="420"
         WindowStyle="None" ResizeMode="CanResize" WindowStartupLocation="CenterOwner"
-        ShowInTaskbar="False" Background="#202024" FontFamily="Segoe UI">
+        ShowInTaskbar="False" Background="#202024" FontFamily="Segoe UI" FontSize="12">
   <WindowChrome.WindowChrome>
     <WindowChrome CaptionHeight="36" ResizeBorderThickness="6" GlassFrameThickness="1"
                   CornerRadius="0" UseAeroCaptionButtons="False"/>
@@ -2922,11 +2981,11 @@ function Show-Settings {
             <StackPanel>
               <StackPanel Orientation="Horizontal">
                 <StackPanel>
-                  <TextBlock Text="Fonte da área de resposta" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+                  <TextBlock Text="Fonte do texto" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
                   <ComboBox x:Name="SetFont" IsEditable="True" MinWidth="240" FontSize="12"/>
                 </StackPanel>
                 <StackPanel Margin="16,0,0,0">
-                  <TextBlock Text="Tamanho" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
+                  <TextBlock Text="Tamanho (13 = padrão; aumenta a interface toda)" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
                   <TextBox x:Name="SetFontSize" Width="60" FontFamily="Cascadia Mono, Consolas"/>
                 </StackPanel>
               </StackPanel>
@@ -3014,11 +3073,11 @@ function Show-Settings {
             $swRect.Stroke = '#3A3A44'; $swRect.StrokeThickness = 1
             try { $swRect.Fill = $T[$k] } catch {}
             $lbl = [System.Windows.Controls.TextBlock]::new()
-            $lbl.Text = $k; $lbl.Width = 64; $lbl.Foreground = $T.status; $lbl.FontSize = 11
+            $lbl.Text = $k; $lbl.Width = 64; $lbl.Foreground = $T.status; $lbl.FontSize = (FSz 11)
             $lbl.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
             $lbl.VerticalAlignment = 'Center'
             $bx = [System.Windows.Controls.TextBox]::new()
-            $bx.Width = 90; $bx.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas'); $bx.FontSize = 11
+            $bx.Width = 90; $bx.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas'); $bx.FontSize = (FSz 11)
             $bx.Text = $T[$k]; $bx.VerticalAlignment = 'Center'
             $bx.Tag = $swRect
             $bx.Add_TextChanged({ param($s2, $e2)
@@ -3115,7 +3174,8 @@ function Show-Settings {
                 # ---- aplica ao vivo o que dá ----
                 $window.Width = $cfg.window.width; $window.Height = $cfg.window.height
                 $script:baseOpacity = $cfg.windowOpacity; $window.Opacity = $script:baseOpacity
-                try { $AnswerDoc.FontSize = [double]$cfg.answerFontSize } catch {}
+                # v3.8: fonte re-escala a janela principal TODA ao vivo (dialogos pegam na proxima abertura)
+                try { Set-FontScale ([double]$cfg.answerFontSize / 13.0) } catch { Log "fontscale apply: $_" }
                 try { $AnswerDoc.FontFamily = [System.Windows.Media.FontFamily]::new([string]$cfg.answerFont) } catch {}
                 $window.Background = $T.bg
                 $AnswerDoc.Foreground = $T.fg
@@ -3133,8 +3193,8 @@ function Show-Settings {
                 }
                 if ($pn -eq [string]$cfg.profile) { Update-ModelBox }
                 Update-ProfileBox
-                Log ("config: aplicado (janela {0}x{1}, opacidade {2:P0}, fonte {3}pt{4})" -f $cfg.window.width, $cfg.window.height, $cfg.windowOpacity, $cfg.answerFontSize, $engNote)
-                $script:setG['SetStatus'].Text = '✓ aplicado — cores completas ao reabrir' + $engNote
+                Log ("config: aplicado (janela {0}x{1}, opacidade {2:P0}, fonte {3}pt ({4:P0} da interface){5})" -f $cfg.window.width, $cfg.window.height, $cfg.windowOpacity, $cfg.answerFontSize, ($cfg.answerFontSize / 13.0), $engNote)
+                $script:setG['SetStatus'].Text = '✓ aplicado — fonte na interface toda; cores completas ao reabrir' + $engNote
                 $script:setG['SetKey'].Clear()
             } catch { Log "config erro: $_"; $script:setG['SetStatus'].Text = "✕ $_" }
         })
@@ -3154,7 +3214,7 @@ function Show-History {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="ZQuick — histórico" Width="580" Height="500" WindowStartupLocation="CenterOwner"
-        Background="#202024" ShowInTaskbar="False" FontFamily="Segoe UI">
+        Background="#202024" ShowInTaskbar="False" FontFamily="Segoe UI" FontSize="12">
   <Window.Resources>
     <Style TargetType="Button">
       <Setter Property="Background" Value="#2A2A30"/>
@@ -3298,7 +3358,7 @@ $timer.Add_Tick({
                         foreach ($d in @($c.diff)) {
                             $tb = [System.Windows.Controls.TextBlock]::new()
                             $tb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
-                            $tb.FontSize = 11; $tb.TextWrapping = 'NoWrap'
+                            $tb.FontSize = (FSz 11); $tb.TextWrapping = 'NoWrap'
                             $s = [string]$d.s
                             $tb.Text = $s
                             if ($s.StartsWith('+')) { $tb.Foreground = '#7CC98A' }
@@ -3480,7 +3540,7 @@ function Show-PlanBar($c) {
         $i++
         $tb = [System.Windows.Controls.TextBlock]::new()
         $tb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
-        $tb.FontSize = 11; $tb.TextWrapping = 'Wrap'
+        $tb.FontSize = (FSz 11); $tb.TextWrapping = 'Wrap'
         $tb.Text = "$i. $([string]$s)"
         $tb.Foreground = $(if ($i % 2 -eq 0) { $T.status } else { $T.fg })
         $null = $PlanSteps.Children.Add($tb)
@@ -3590,10 +3650,10 @@ function Show-AskBar($c) {
         if (-not $single) {
             $ht = [System.Windows.Controls.TextBlock]::new()
             $ht.Text = "$qi · " + ([string]$q.h).ToUpperInvariant()
-            $ht.Foreground = $T.status; $ht.FontSize = 10; $ht.FontWeight = 'SemiBold'; $ht.Margin = '0,4,0,2'
+            $ht.Foreground = $T.status; $ht.FontSize = (FSz 10); $ht.FontWeight = 'SemiBold'; $ht.Margin = '0,4,0,2'
             $null = $qsp.Children.Add($ht)
             $qt = [System.Windows.Controls.TextBlock]::new()
-            $qt.Text = [string]$q.q; $qt.Foreground = $T.fg; $qt.TextWrapping = 'Wrap'; $qt.FontSize = 12; $qt.FontWeight = 'SemiBold'
+            $qt.Text = [string]$q.q; $qt.Foreground = $T.fg; $qt.TextWrapping = 'Wrap'; $qt.FontSize = (FSz 12); $qt.FontWeight = 'SemiBold'
             $null = $qsp.Children.Add($qt)
         }
         $oi = 0
@@ -3607,11 +3667,11 @@ function Show-AskBar($c) {
             $btn.HorizontalContentAlignment = 'Left'
             $btn.Padding = '10,6'; $btn.Margin = '0,2'
             $sp = [System.Windows.Controls.StackPanel]::new()
-            $t1 = [System.Windows.Controls.TextBlock]::new(); $t1.Text = $lbl; $t1.FontWeight = 'SemiBold'; $t1.FontSize = 12
+            $t1 = [System.Windows.Controls.TextBlock]::new(); $t1.Text = $lbl; $t1.FontWeight = 'SemiBold'; $t1.FontSize = (FSz 12)
             $null = $sp.Children.Add($t1)
             if ($desc) {
                 $t2 = [System.Windows.Controls.TextBlock]::new(); $t2.Text = $desc
-                $t2.Foreground = $T.status; $t2.FontSize = 11; $t2.TextWrapping = 'Wrap'
+                $t2.Foreground = $T.status; $t2.FontSize = (FSz 11); $t2.TextWrapping = 'Wrap'
                 $null = $sp.Children.Add($t2)
             }
             $btn.Content = $sp
@@ -3635,11 +3695,11 @@ function Show-AskBar($c) {
             if ($prev) {
                 # preview mono (codigo/mockup/config) — botao 👁 expande/colapsa
                 $pvBtn = [System.Windows.Controls.Button]::new()
-                $pvBtn.Content = '👁'; $pvBtn.Padding = '4,2'; $pvBtn.Margin = '4,0,0,2'; $pvBtn.FontSize = 11
+                $pvBtn.Content = '👁'; $pvBtn.Padding = '4,2'; $pvBtn.Margin = '4,0,0,2'; $pvBtn.FontSize = (FSz 11)
                 $pvTb = [System.Windows.Controls.TextBlock]::new()
                 $pvTb.Text = $prev
                 $pvTb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
-                $pvTb.FontSize = 11; $pvTb.TextWrapping = 'Wrap'; $pvTb.Foreground = $T.code
+                $pvTb.FontSize = (FSz 11); $pvTb.TextWrapping = 'Wrap'; $pvTb.Foreground = $T.code
                 $pvBox = [System.Windows.Controls.Border]::new()
                 $pvBox.Background = $T.input; $pvBox.BorderBrush = $T.border; $pvBox.BorderThickness = '1'
                 $pvBox.CornerRadius = '4'; $pvBox.Padding = '6,4'; $pvBox.Margin = '0,2,0,4'
@@ -3659,7 +3719,7 @@ function Show-AskBar($c) {
         }
         # texto livre desta pergunta (aparece com o ✎)
         $fb = [System.Windows.Controls.TextBox]::new()
-        $fb.Height = 28; $fb.Margin = '0,4,0,0'; $fb.FontSize = 12
+        $fb.Height = 28; $fb.Margin = '0,4,0,0'; $fb.FontSize = (FSz 12)
         $fb.Background = $T.input; $fb.Foreground = $T.fg; $fb.BorderBrush = $T.border
         $fb.CaretBrush = $T.fg; $fb.Padding = '6,4'; $fb.Visibility = 'Collapsed'
         [System.Windows.Automation.AutomationProperties]::SetAutomationId($fb, "AskQ${qi}Free")
