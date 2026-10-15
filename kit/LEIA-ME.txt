@@ -36,19 +36,26 @@ INSTALAÇÃO (em outro PC)
   Inicialização (abre oculto na bandeja a cada logon).
 
 CHAVES DE OUTRAS LLMs (perfis)
-  Tudo fica no zquick.json, seção "profiles". Cada perfil é um
-  provedor. Funciona com QUALQUER endpoint compatível com a API
-  Anthropic (/v1/messages). Já vem com dois exemplos:
+  Não precisa ser Claude: o ZQuick fala a API Anthropic (/v1/messages)
+  e qualquer provedor que exponha esse padrão serve — Z.ai (GLM),
+  Kimi/Moonshot, DeepSeek, MiniMax e Qwen falam-no de fábrica (para
+  Gemini/OpenAI/Mistral é preciso um gateway de tradução). Tudo fica
+  no zquick.json, seção "profiles" — cada perfil é um provedor. Já
+  vem com dois exemplos:
 
     "zai"  → Z.ai (chave em https://z.ai)
     "kimi" → Moonshot Kimi (chave em https://platform.moonshot.cn)
 
-  Para usar outro (ex.: OpenRouter, DeepSeek, sua API própria...),
-  copie um bloco, troque baseUrl/apiKey e liste os modelos em
-  "models". "fastModel" = modelo veloz do perfil; "bigModel" =
-  modelo forte (usado pelo modo auto); "visionModel" = modelo que
-  aceita imagem, se o provedor tiver um diferente. Depois é só
-  escolher o perfil na primeira caixa do topo da janela.
+  Para usar outro, copie um bloco, troque baseUrl/apiKey e liste os
+  modelos em "models" — ou aperte "🔎 listar da API" no ⚙: o app
+  consulta o provedor (GET /v1/models), preenche a caixa sozinho e
+  marca com ⭐ o recomendado (o maior modelo "cheio"; variantes
+  flash/turbo/air/mini/lite ficam fora da indicação — a estrela é
+  só visual, nunca vai para a API). "fastModel" = modelo veloz do
+  perfil; "bigModel" = modelo forte (usado pelo modo auto);
+  "visionModel" = modelo que aceita imagem, se o provedor tiver um
+  diferente. Depois é só escolher o perfil na primeira caixa do
+  topo da janela.
 
 USO
   Alt+Q ....... mostra/oculta (registro sólido, funciona sempre);
@@ -94,6 +101,11 @@ USO
                 arraste e redimensione à vontade, o próximo abrir
                 volta como você deixou (marque "centralizar" no ⚙
                 para abrir sempre no centro).
+  📌 ........... fixa a janela SEMPRE NO TOPO (por cima dos outros
+                programas): botão 📌 na barra de título (e no ⚙).
+  Ctrl+roda .... roda do mouse COM Ctrl sobre qualquer janela do app
+                ajusta a OPACIDADE ao vivo (40–100%). A transparência
+                é real: dá para ver a Área de Trabalho por trás.
   Ícone Z na bandeja: duplo clique = mostrar; botão direito = Sair.
 
 ANEXOS DE ARQUIVO
@@ -191,9 +203,13 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
   Tudo abaixo aparece com campos prontos na aba certa do ⚙; editar o
   json à mão dá no mesmo (reinicie o app depois).
 
+  answerFontSize . tamanho do texto das respostas (13 = 100%). Ao
+                   mudar, A INTERFACE INTEIRA escala junto — botões,
+                   caixas e diálogos, não só a resposta.
   windowOpacity .. opacidade da janela: 1.0 = opaca, 0.8 = 80%, 0.5 =
                    metade. Aplica ao abrir o app (no ⚙ muda na hora,
-                   com régua de 40-100%).
+                   com régua de 40-100%; Ctrl+roda do mouse sobre a
+                   janela também, ao vivo).
   theme .......... paleta de cores da janela inteira (fundo, texto,
                    links, respostas, ícone da bandeja). Chaves e o que
                    cada uma pinta (tudo em HEX #RRGGBB):
