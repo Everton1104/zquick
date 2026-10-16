@@ -10,7 +10,7 @@
     "zai": {
       "label": "Z.ai GLM",
       "baseUrl": "https://api.z.ai/api/anthropic",
-      "apiKey": "COLE-AQUI-SUA-CHAVE-ZAI",
+      "apiKey": "",
       "fastModel": "glm-5.3-flash",
       "bigModel": "glm-5.3",
       "visionModel": "glm-5.3-flash",
@@ -23,7 +23,7 @@
     "kimi": {
       "label": "Kimi (exemplo)",
       "baseUrl": "https://api.moonshot.cn/anthropic",
-      "apiKey": "COLE-AQUI-SUA-CHAVE-KIMI",
+      "apiKey": "",
       "fastModel": "kimi-k2-0905-preview",
       "bigModel": "kimi-k2-0905-preview",
       "models": [

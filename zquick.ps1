@@ -32,6 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
+$appVer = '3.19'   # v3.19: versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -2712,8 +2713,16 @@ function Save-WindowPos {
 $script:winSaveTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:winSaveTimer.Interval = [TimeSpan]::FromMilliseconds(1200)
 $script:winSaveTimer.Add_Tick({ $script:winSaveTimer.Stop(); Save-WindowPos })
+$script:centering = $false
 $window.Add_SizeChanged({ if (-not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() } })
-$window.Add_LocationChanged({ if (-not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() } })
+$window.Add_LocationChanged({
+    # v3.19: mover a janela = o usuário escolheu posição — "centralizar" desliga sozinho
+    if (-not $script:centering -and $cfg.window.center) {
+        $cfg.window.center = $false
+        Log 'janela: movida pelo usuário — passa a abrir na última posição/tamanho'
+    }
+    if (-not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() }
+})
 
 # ---------- estado ----------
 $script:busy = $false
@@ -3213,7 +3222,11 @@ function Send-Current {
 }
 
 function New-Conversation {
-    $script:engine.Reset()
+    # v3.19: o wizard e o Aplicar do ⚙ anulam o motor (recria no próximo envio) —
+    # Esc/New chamava Reset() no null e derrubava o app (FATAL no Run). Tenta recriar;
+    # sem chave segue sem motor, só não crasheia.
+    if ($null -ne $script:engine) { $script:engine.Reset() }
+    else { $null = Ensure-Engine }
     $script:busy = $false
     $script:curAnswer = ''; $script:lastAnswer = ''; $script:pendSources = @(); $script:livePanel = $null
     $script:convFile = $null
@@ -3579,6 +3592,8 @@ function Show-Settings {
                   <DockPanel Margin="0,10,0,4">
                     <Button DockPanel.Dock="Right" x:Name="SetListModels" Content="🔎 listar da API" Margin="6,0,0,0" Padding="8,2" FontSize="11"
                             ToolTip="Busca a lista de modelos do provedor (GET /v1/models do padrão Anthropic) e preenche a caixa abaixo"/>
+                    <Button DockPanel.Dock="Right" x:Name="SetWiz" Content="🧙 assistente" Margin="6,0,0,0" Padding="8,2" FontSize="11"
+                            ToolTip="Assistente de configuração: testa a conexão, mede a velocidade de cada modelo, recomenda rápido/forte, inicialização com o Windows e atalho"/>
                     <TextBlock Text="modelos (vírgula — caixa do topo)" Foreground="#9A9AA5" FontSize="11" VerticalAlignment="Center"/>
                   </DockPanel>
                   <TextBox x:Name="SetModels" FontFamily="Cascadia Mono, Consolas"/>
@@ -3663,7 +3678,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetWiz','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
@@ -3979,6 +3994,9 @@ function Show-Settings {
                 Log ("config: listar modelos falhou: {0}" -f $_.Exception.Message)
             }
         })
+
+        # v3.19: assistente de configuração — conexão, benchmark dos modelos, recomendação, autostart, atalho
+        $g['SetWiz'].Add_Click({ try { Show-SetupWizard $true } catch { Log "wizard(config): $_" } })
 
         $g['SetApply'].Add_Click({
             try {
@@ -4538,6 +4556,7 @@ $timer.Add_Tick({
 
 # ---------- janela: mostrar/ocultar/centro ----------
 function Center-Window {
+    $script:centering = $true   # v3.19: handler de LocationChanged nao deve ler isto como "usuário moveu"
     try {
         $sp = [System.Windows.Forms.Cursor]::Position
         $wa = [System.Windows.Forms.Screen]::FromPoint($sp).WorkingArea
@@ -4546,6 +4565,7 @@ function Center-Window {
         $window.Left = [Math]::Round($wa.Left * $dip + ($wa.Width * $dip - $window.Width) / 2)
         $window.Top = [Math]::Round($wa.Top * $dip + ($wa.Height * $dip - $window.Height) / 2)
     } catch { Log "center: $_" }
+    $script:centering = $false
 }
 
 function Reset-Conversation {
@@ -5096,6 +5116,8 @@ $icon = [System.Drawing.Icon]::FromHandle($hIcon)
 $menu = [System.Windows.Forms.ContextMenuStrip]::new()
 $miShow = [System.Windows.Forms.ToolStripMenuItem]::new('Mostrar')
 $miShow.Add_Click({ Toggle-Window })
+$miWiz = [System.Windows.Forms.ToolStripMenuItem]::new('Assistente de configuração')
+$miWiz.Add_Click({ try { Show-SetupWizard $true } catch { Log "wizard(bandeja): $_" } })
 $miExit = [System.Windows.Forms.ToolStripMenuItem]::new('Sair')
 $miExit.Add_Click({
     $script:exiting = $true
@@ -5103,12 +5125,502 @@ $miExit.Add_Click({
     try { $notify.Visible = $false; $notify.Dispose() } catch {}
     [System.Windows.Application]::Current.Shutdown()
 })
-$menu.Items.AddRange([System.Windows.Forms.ToolStripMenuItem[]]@($miShow, $miExit))
+$menu.Items.AddRange([System.Windows.Forms.ToolStripItem[]]@(
+    $miShow, [System.Windows.Forms.ToolStripSeparator]::new(), $miWiz, [System.Windows.Forms.ToolStripSeparator]::new(), $miExit))
 
 $notify = [System.Windows.Forms.NotifyIcon]::new()
 $notify.Icon = $icon; $notify.Text = 'ZQuick'
 $notify.ContextMenuStrip = $menu; $notify.Visible = $true
 $notify.Add_DoubleClick({ Toggle-Window })
+
+# ---------- v3.19: assistente de configuracao (wizard) ----------
+# 4 etapas: conexao (URL + chave + teste) -> benchmark dos modelos (tempo de resposta
+# de cada um + recomendacao rapido/forte/visao) -> preferencias (iniciar com o Windows,
+# atalho com sonda de disponibilidade) -> revisao e aplicar. Estado em $script:wzG/wzSt
+# (handlers de WPF nao sao closures — licao do dialogo de config).
+
+function Get-ZQAutostart {
+    # v3.19: duas fontes — chave Run (o que o assistente grava) e o atalho da
+    # Inicializacao (o que o kit antigo criava); o assistente enxerga as duas
+    try { if ((Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ZQuick' -ErrorAction Stop).'ZQuick') { return $true } } catch {}
+    try { if (Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ZQuick.lnk')) { return $true } } catch {}
+    return $false
+}
+function Set-ZQAutostart([bool]$on) {
+    $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ZQuick.lnk'
+    try {
+        if ($on) {
+            $exe = $null
+            try { $exe = (Get-Process -Id $PID).Path } catch {}
+            if ($exe -and $exe -match '\.exe$') { $cmd = '"' + $exe + '" -Hidden' }
+            else { $cmd = 'powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $appDir 'zquick.ps1') + '" -Hidden' }
+            Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ZQuick' -Value $cmd
+            if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue; Log 'wizard: atalho antigo da Inicialização removido (agora é chave Run)' }
+            Log ('wizard: iniciar com o Windows LIGADO (' + $cmd + ')')
+        } else {
+            Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ZQuick' -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue }
+            Log 'wizard: iniciar com o Windows DESLIGADO'
+        }
+        return $true
+    } catch { Log ('wizard: autostart: ' + $_.Exception.Message); return $false }
+}
+
+# auth das caixas do wizard: URL da caixa; chave da caixa ou a atual do perfil/ambiente
+function Wz-Auth {
+    $g = $script:wzG
+    $base = ([string]$g['WzUrl'].Text).Trim()
+    if (-not $base) { $base = 'https://api.z.ai/api/anthropic' }
+    $key = ([string]$g['WzKey'].Password).Trim()
+    if (-not $key) {
+        try { $key = (Resolve-ProfileAuth (Get-ActiveProfile)).key } catch { throw 'digite a chave da API' }
+    }
+    @{ base = $base; key = $key }
+}
+
+function Wz-TestConn {
+    $g = $script:wzG; $st = $script:wzSt
+    try {
+        $g['WzConn'].Text = '🔌 testando conexão…'
+        [void]$script:wzWin.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+        $auth = Wz-Auth
+        $r = Invoke-RestMethod -Method Get -Uri ($auth.base.TrimEnd('/') + '/v1/models') `
+             -Headers @{ 'x-api-key' = $auth.key; 'anthropic-version' = '2023-06-01' } -TimeoutSec 25
+        $ids = @($r.data | ForEach-Object { [string]$_.id } | Where-Object { $_ })
+        if (-not $ids.Count) { throw 'a API respondeu sem lista de modelos' }
+        $st.ids = $ids; $st.ok = $true
+        $g['WzConn'].Text = ('✔ conectado — {0} modelos disponíveis. Avance para medir a velocidade de cada um.' -f $ids.Count)
+        Log ('wizard: conexao ok (' + $ids.Count + ' modelos em ' + $auth.base + ')')
+    } catch {
+        $st.ok = $false; $st.ids = @()
+        $g['WzConn'].Text = '✕ ' + $_.Exception.Message
+        Log ('wizard: conexao falhou: ' + $_.Exception.Message)
+    }
+}
+
+# uma pergunta minima (max_tokens 8) por modelo, cronometrada; lista ordenada pelo tempo
+function Wz-Bench {
+    $g = $script:wzG; $st = $script:wzSt
+    if ($st.benchBusy) { return }
+    if (-not $st.ok) {
+        Wz-TestConn
+        if (-not $st.ok) { $g['WzBenchStatus'].Text = '✕ conecte primeiro (etapa 1)'; return }
+    }
+    $st.benchBusy = $true
+    foreach ($b in @('WzBench', 'WzNext', 'WzBack')) { $g[$b].IsEnabled = $false }
+    try {
+        $auth = Wz-Auth
+        $ids = @($st.ids) | Select-Object -First 12
+        $rows = @(); $i = 0
+        foreach ($id in $ids) {
+            $i++
+            $g['WzBenchStatus'].Text = ('⏱ testando {0} ({1}/{2})…' -f $id, $i, $ids.Count)
+            [void]$script:wzWin.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+            $ms = -1; $err = $null
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                $body = @{ model = $id; max_tokens = 8; messages = @(@{ role = 'user'; content = 'Responda apenas: 1' }) } | ConvertTo-Json -Depth 4
+                $null = Invoke-RestMethod -Method Post -Uri ($auth.base.TrimEnd('/') + '/v1/messages') -Body $body `
+                     -ContentType 'application/json; charset=utf-8' -Headers @{ 'x-api-key' = $auth.key; 'anthropic-version' = '2023-06-01' } -TimeoutSec 40
+                $sw.Stop(); $ms = [int]$sw.ElapsedMilliseconds
+            } catch { $sw.Stop(); $err = $_.Exception.Message }
+            if ($ms -ge 0) { $rows += [pscustomobject]@{ Id = $id; Ms = $ms } }
+            else { $rows += [pscustomobject]@{ Id = $id; Ms = 999999 }; $g['WzBenchStatus'].Text = ('⚠ {0}: {1} — seguindo…' -f $id, $err) }
+        }
+        $st.rows = @($rows | Sort-Object Ms)
+        $st.times = $true
+        $g['WzBenchList'].ItemsSource = [string[]]@($st.rows | ForEach-Object {
+            if ($_.Ms -ge 999999) { '✕ falhou    — ' + $_.Id } else { ('{0,5} ms — {1}' -f $_.Ms, $_.Id) } })
+        # recomendacoes: rapido = mais veloz que respondeu; forte = maior versao "cheia"
+        # (mesma logica do ⭐ do ⚙); visao = primeiro com cara de flash/vision
+        $okRows = @($st.rows | Where-Object { $_.Ms -lt 999999 })
+        $full = @($ids | Where-Object { $_ -notmatch '(?i)flash|turbo|air|mini|lite|preview|thinking' } |
+            Sort-Object { $v = ($_ -replace '[^0-9.]', '').Trim('.'); try { [version]$v } catch { [version]'0.0' } })
+        $st.fast = $null; $st.big = $null; $st.vision = $null
+        if ($okRows.Count -gt 0) { $st.fast = [string]$okRows[0].Id }
+        if ($full.Count -gt 0) { $st.big = [string]$full[-1] }
+        if (-not $st.big -and $okRows.Count -gt 1) { $st.big = [string]$okRows[-1].Id }
+        $st.vision = [string](@($ids | Where-Object { $_ -match '(?i)flash|vision' } | Select-Object -First 1))
+        $g['WzRec'].Text = ('⚡ rápido: {0}   (pesquisas simples)' -f $(if ($st.fast) { $st.fast } else { '—' })) + "`n" + `
+                          ('🧠 forte: {0}   (tarefas complexas)' -f $(if ($st.big) { $st.big } else { '—' })) + "`n" + `
+                          ('👁 visão: {0}   (lê prints)' -f $(if ($st.vision) { $st.vision } else { '—' }))
+        $g['WzBenchStatus'].Text = ('✔ {0} de {1} modelo(s) responderam — recomendação abaixo' -f $okRows.Count, $ids.Count)
+        Log ('wizard: benchmark {0} modelos (rapido={1} forte={2} visao={3})' -f $ids.Count, $st.fast, $st.big, $st.vision)
+    } catch {
+        $g['WzBenchStatus'].Text = '✕ ' + $_.Exception.Message
+        Log ('wizard: benchmark falhou: ' + $_.Exception.Message)
+    } finally {
+        $st.benchBusy = $false
+        foreach ($b in @('WzBench', 'WzNext', 'WzBack')) { $g[$b].IsEnabled = $true }
+    }
+}
+
+function Wz-HkString {
+    $g = $script:wzG
+    $s = ''
+    if ($g['WzHkCtrl'].IsChecked)  { $s += 'ctrl+' }
+    if ($g['WzHkAlt'].IsChecked)   { $s += 'alt+' }
+    if ($g['WzHkShift'].IsChecked) { $s += 'shift+' }
+    $k = ([string]$g['WzHkKey'].Text).Trim()
+    if (-not $k) { $k = 'q' }
+    $s + $k.ToLower()
+}
+
+# sonda: registra a combinacao no hwnd do PROPRIO wizard (id 7, nunca usado pelo app)
+# — se registrar, esta livre; se falhar, ou e' o atalho atual do app (ele o segura) ou esta ocupado
+function Wz-HkTest {
+    $g = $script:wzG
+    try {
+        $mods = 0
+        if ($g['WzHkCtrl'].IsChecked)  { $mods += 2 }
+        if ($g['WzHkAlt'].IsChecked)   { $mods += 1 }
+        if ($g['WzHkShift'].IsChecked) { $mods += 4 }
+        if (-not $mods) { $g['WzHkStatus'].Text = '⚠ marque pelo menos um modificador (Ctrl/Alt/Shift)'; return }
+        $k = ([string]$g['WzHkKey'].Text).Trim()
+        if (-not $k) { $g['WzHkStatus'].Text = '⚠ digite a tecla (ex.: Q)'; return }
+        $vk = [uint32][int][char]::ToUpper($k[0])
+        if (-not $script:wzHwnd -or $script:wzHwnd -eq [IntPtr]::Zero) {
+            $script:wzHwnd = ([System.Windows.Interop.HwndSource]::FromVisual($script:wzWin)).Handle
+        }
+        $ok = [Native.Hotkey]::RegisterHotKey($script:wzHwnd, 7, [uint32]$mods, $vk)
+        if ($ok) {
+            [void][Native.Hotkey]::UnregisterHotKey($script:wzHwnd, 7)
+            $g['WzHkStatus'].Text = ('✔ {0} está livre — vai funcionar' -f (Wz-HkString))
+        } elseif ((Wz-HkString) -eq [string]$cfg.hotkey) {
+            $g['WzHkStatus'].Text = '✔ é o atalho ATUAL do ZQuick (ele mesmo o segura) — pode manter'
+        } else {
+            $g['WzHkStatus'].Text = ('✕ {0} está ocupado por outro programa — tente outra combinação' -f (Wz-HkString))
+        }
+    } catch { $script:wzG['WzHkStatus'].Text = '✕ teste: ' + $_.Exception.Message }
+}
+
+function Wz-GoStep([int]$n) {
+    $g = $script:wzG; $st = $script:wzSt
+    $n = [Math]::Max(1, [Math]::Min(4, $n))
+    $st.step = $n
+    foreach ($i in 1..4) { $g[('WzP' + $i)].Visibility = $(if ($i -eq $n) { 'Visible' } else { 'Collapsed' }) }
+    $titles = @{ 1 = 'Conexão'; 2 = 'Modelos & velocidade'; 3 = 'Preferências'; 4 = 'Revisar & concluir' }
+    $g['WzStep'].Text = ('Etapa {0} de 4 — {1}' -f $n, $titles[$n])
+    $g['WzBack'].Visibility   = $(if ($n -eq 1) { 'Collapsed' } else { 'Visible' })
+    $g['WzNext'].Visibility   = $(if ($n -eq 4) { 'Collapsed' } else { 'Visible' })
+    $g['WzFinish'].Visibility = $(if ($n -eq 4) { 'Visible' } else { 'Collapsed' })
+    if ($n -eq 4) { $g['WzSum'].Text = Wz-Summary }
+    # entra na etapa 2 com a lista na mao -> ja mede (via dispatcher: o clique do
+    # "Avançar" nao pode ficar preso esperando o benchmark inteiro; botoes desarmam)
+    if ($n -eq 2 -and -not $st.times -and $st.ok) {
+        $null = $script:wzWin.Dispatcher.BeginInvoke([Action]{ Wz-Bench }, [System.Windows.Threading.DispatcherPriority]::Background)
+    }
+}
+
+function Wz-Summary {
+    $g = $script:wzG; $st = $script:wzSt
+    $p = Get-ActiveProfile
+    $fast = $(if ($st.fast)   { [string]$st.fast }   else { [string](Get-CfgProp $p 'fastModel') })
+    $big  = $(if ($st.big)    { [string]$st.big }    else { [string](Get-CfgProp $p 'bigModel') })
+    $vis  = $(if ($st.vision) { [string]$st.vision } else { [string](Get-CfgProp $p 'visionModel') })
+    (@(
+        ('perfil: {0} — {1}' -f [string]$cfg.profile, ([string]$g['WzUrl'].Text).Trim()),
+        ('  rápido (simples): {0}' -f $(if ($fast) { $fast } else { '—' })),
+        ('  forte  (complexo): {0}' -f $(if ($big) { $big } else { '—' })),
+        ('  visão  (prints): {0}' -f $(if ($vis) { $vis } else { '—' })),
+        ('modo auto: {0}' -f $(if ($g['WzModelAuto'].IsChecked) { 'sim' } else { 'não' })),
+        ('iniciar com o Windows: {0}' -f $(if ($g['WzAuto'].IsChecked) { 'sim' } else { 'não' })),
+        ('atalho: {0}' -f (Wz-HkString)),
+        ('janela: {0}' -f $(if ($g['WzCenter'].IsChecked) { 'centralizada' } else { 'última posição usada' }))
+    ) -join "`n")
+}
+
+function Wz-Finish {
+    $g = $script:wzG; $st = $script:wzSt
+    try {
+        $g['WzFinish'].IsEnabled = $false
+        # perfil: url/chave/lista/recomendacoes
+        $p = Get-ActiveProfile
+        $nb = ([string]$g['WzUrl'].Text).Trim()
+        if ($nb) { Set-CfgProp $p 'baseUrl' $nb }
+        $nk = ([string]$g['WzKey'].Password).Trim()
+        if ($nk) { Set-CfgProp $p 'apiKey' $nk }
+        if ($st.ids -and @($st.ids).Count -gt 0) { Set-CfgProp $p 'models' (@('auto') + @($st.ids)) }
+        if ($st.fast)   { Set-CfgProp $p 'fastModel'   ([string]$st.fast) }
+        if ($st.big)    { Set-CfgProp $p 'bigModel'    ([string]$st.big) }
+        if ($st.vision) { Set-CfgProp $p 'visionModel' ([string]$st.vision) }
+        if ($g['WzModelAuto'].IsChecked) { $cfg.model = 'auto' }
+        # atalho: se mudou, re-arma no hwnd da janela principal (ids 1/2)
+        if (-not ($g['WzHkCtrl'].IsChecked -or $g['WzHkAlt'].IsChecked -or $g['WzHkShift'].IsChecked)) { $g['WzHkAlt'].IsChecked = $true }
+        $hk = Wz-HkString
+        if ($hk -ne [string]$cfg.hotkey) {
+            $cfg.hotkey = $hk
+            try {
+                $src = [System.Windows.Interop.HwndSource]::FromVisual($window)
+                [void][Native.Hotkey]::UnregisterHotKey($src.Handle, 1)
+                [void][Native.Hotkey]::UnregisterHotKey($src.Handle, 2)
+                $sp = Get-HotkeySpec $hk
+                $okHk = [Native.Hotkey]::RegisterHotKey($src.Handle, 1, $sp.Mods, $sp.Vk)
+                if (-not $okHk) {
+                    $sp2 = Get-HotkeySpec 'alt+q'
+                    [void][Native.Hotkey]::RegisterHotKey($src.Handle, 2, $sp2.Mods, $sp2.Vk)
+                    $StatusText.Text = 'atalho ' + $hk + ' ocupado — seguindo com Alt+Q'
+                }
+                Log ('wizard: atalho trocado para {0} (registro {1})' -f $hk, $okHk)
+            } catch { Log ('wizard: re-arm do atalho falhou: ' + $_.Exception.Message) }
+        }
+        Set-ZQAutostart ([bool]$g['WzAuto'].IsChecked)
+        $cfg.window.center = [bool]$g['WzCenter'].IsChecked
+        Save-Config
+        # motor pega baseUrl/models/chave novos
+        if (-not $script:busy -and $script:engine) { $script:engine = $null }
+        Update-ProfileBox
+        Update-ModelBox
+        $StatusText.Text = '✔ configurado pelo assistente'
+        Log ('wizard: configurado (perfil={0} modelos={1} auto={2} autostart={3} atalho={4} centro={5})' -f `
+            $cfg.profile, $(if ($st.ids) { @($st.ids).Count } else { 0 }), [bool]$g['WzModelAuto'].IsChecked, `
+            [bool]$g['WzAuto'].IsChecked, [string]$cfg.hotkey, [bool]$g['WzCenter'].IsChecked)
+        try { $script:wzWin.DialogResult = $true } catch { try { $script:wzWin.Close() } catch {} }
+    } catch {
+        Log ('wizard: erro ao salvar: ' + $_.Exception.Message)
+        try { $g['WzSum'].Text = '✕ ' + $_.Exception.Message } catch {}
+        $g['WzFinish'].IsEnabled = $true
+    }
+}
+
+function Show-SetupWizard([bool]$first) {
+    try {
+        $wxStr = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ZQuick — assistente de configuração" Width="620" SizeToContent="Height" MaxHeight="720"
+        WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True" WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False" Background="#202024" FontFamily="Segoe UI" FontSize="12">
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="40" ResizeBorderThickness="0" GlassFrameThickness="1"
+                  CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="#2A2A30"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="Padding" Value="10,4"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style x:Key="ChromeBtn" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="9,5"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#3A3A44"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Background" Value="#16161A"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="CaretBrush" Value="#E8E8EC"/>
+      <Setter Property="SelectionBrush" Value="#3B78FF"/>
+      <Setter Property="Padding" Value="6,4"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Style.Triggers>
+        <Trigger Property="IsKeyboardFocusWithin" Value="True">
+          <Setter Property="BorderBrush" Value="#3B78FF"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="PasswordBox">
+      <Setter Property="Background" Value="#16161A"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="CaretBrush" Value="#E8E8EC"/>
+      <Setter Property="SelectionBrush" Value="#3B78FF"/>
+      <Setter Property="Padding" Value="6,4"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Style.Triggers>
+        <Trigger Property="IsKeyboardFocusWithin" Value="True">
+          <Setter Property="BorderBrush" Value="#3B78FF"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <!-- v3.19: CheckBox do wizard — caixinha escura com ✔ no accent (padrao do WPF e' branco) -->
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <StackPanel Orientation="Horizontal" Background="Transparent">
+              <Border x:Name="Bd" Width="16" Height="16" CornerRadius="3" Background="#16161A"
+                      BorderBrush="#3A3A44" BorderThickness="1" VerticalAlignment="Center">
+                <Path x:Name="Ck" Data="M3,7.5 L6.5,11 12,3.5" Stroke="#C0FFEE" StrokeThickness="2"
+                      Visibility="Collapsed" Stretch="None"/>
+              </Border>
+              <ContentPresenter Margin="7,0,0,0" VerticalAlignment="Center"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
+                <Setter TargetName="Ck" Property="Visibility" Value="Visible"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#3B78FF"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ListBox">
+      <Setter Property="Background" Value="#16161A"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="Padding" Value="4"/>
+      <Setter Property="FontSize" Value="12"/>
+    </Style>
+    <Style TargetType="ListBoxItem">
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="Padding" Value="6,3"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListBoxItem">
+            <Border x:Name="Bd" Background="Transparent" Padding="{TemplateBinding Padding}" CornerRadius="3">
+              <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#2A2A30"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <DockPanel>
+    <Border DockPanel.Dock="Top" Padding="14,10,4,4">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" Style="{StaticResource ChromeBtn}" x:Name="WzClose" Content="✕"/>
+        <StackPanel>
+          <TextBlock Text="Assistente de configuração" Foreground="#E8E8EC" FontSize="15" FontWeight="Bold"/>
+          <TextBlock x:Name="WzStep" Text="Etapa 1 de 4 — Conexão" Foreground="#9A9AA5" FontSize="11" Margin="0,2,0,0"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+    <Border DockPanel.Dock="Bottom" Padding="14,10,14,14" BorderBrush="#3A3A44" BorderThickness="0,1,0,0" Background="#2A2A30">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" x:Name="WzFinish" Content="✔ Concluir" Padding="16,6" FontWeight="Bold" Visibility="Collapsed" Margin="8,0,0,0"/>
+        <Button DockPanel.Dock="Right" x:Name="WzNext" Content="Avançar ▶" Padding="14,6" Margin="8,0,0,0"/>
+        <Button x:Name="WzBack" Content="◀ Voltar" Padding="14,6" Visibility="Collapsed"/>
+      </DockPanel>
+    </Border>
+    <Grid Margin="16,8,16,12">
+      <StackPanel x:Name="WzP1">
+        <TextBlock Foreground="#E8E8EC" TextWrapping="Wrap"
+                   Text="Configuramos o ZQuick em 4 etapas: conexão, velocidade dos modelos, preferências e revisão." Margin="0,0,0,10"/>
+        <TextBlock Foreground="#9A9AA5" Text="Endereço da API (padrão Anthropic — /v1/messages):" Margin="0,0,0,4"/>
+        <TextBox x:Name="WzUrl"/>
+        <TextBlock Foreground="#9A9AA5" Text="Chave da API (vazio = manter a atual):" Margin="0,10,0,4"/>
+        <PasswordBox x:Name="WzKey"/>
+        <Button x:Name="WzTest" Content="🔌 Testar conexão" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+        <TextBlock x:Name="WzConn" Foreground="#9A9AA5" TextWrapping="Wrap" Margin="0,10,0,0"
+                   Text="Z.ai: a chave sai de z.ai (API Keys). Teste a conexão para avançar."/>
+      </StackPanel>
+      <StackPanel x:Name="WzP2" Visibility="Collapsed">
+        <TextBlock Foreground="#E8E8EC" TextWrapping="Wrap"
+                   Text="Cada modelo responde uma pergunta mínima, cronometrada — a recomendação de rápido/forte sai daqui." Margin="0,0,0,10"/>
+        <Button x:Name="WzBench" Content="⚡ Medir novamente" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+        <TextBlock x:Name="WzBenchStatus" Foreground="#9A9AA5" Text="aguardando…" Margin="0,0,0,6"/>
+        <ListBox x:Name="WzBenchList" Height="170"/>
+        <TextBlock x:Name="WzRec" Foreground="#E8E8EC" FontFamily="Consolas" Margin="0,10,0,0" Text=""/>
+      </StackPanel>
+      <StackPanel x:Name="WzP3" Visibility="Collapsed">
+        <TextBlock Foreground="#E8E8EC" Text="Iniciar o ZQuick junto com o Windows?" Margin="0,0,0,6"/>
+        <CheckBox x:Name="WzAuto" Content="sim — abrir oculto na bandeja a cada logon" Margin="8,0,0,12"/>
+        <TextBlock Foreground="#E8E8EC" Text="Atalho para abrir/ocultar a janela:" Margin="0,0,0,2"/>
+        <TextBlock x:Name="WzHkCur" Foreground="#6E6E7A" FontSize="11" Margin="0,0,0,8"/>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+          <CheckBox x:Name="WzHkCtrl" Content="Ctrl" MinWidth="62"/>
+          <CheckBox x:Name="WzHkAlt" Content="Alt" MinWidth="62" Margin="8,0,0,0"/>
+          <CheckBox x:Name="WzHkShift" Content="Shift" MinWidth="62" Margin="8,0,0,0"/>
+          <TextBlock Text="+" Foreground="#9A9AA5" VerticalAlignment="Center" Margin="8,0,8,0"/>
+          <TextBox x:Name="WzHkKey" Width="46" MaxLength="1" CharacterCasing="Upper" Text="Q"/>
+        </StackPanel>
+        <TextBlock Foreground="#6E6E7A" FontSize="11" TextWrapping="Wrap"
+                   Text="Marque pelo menos um modificador. Evite o Win: o Windows costuma tomar de volta." Margin="0,0,0,8"/>
+        <Button x:Name="WzHkTest" Content="Testar atalho" HorizontalAlignment="Left"/>
+        <TextBlock x:Name="WzHkStatus" Foreground="#9A9AA5" Margin="0,8,0,0" Text=""/>
+      </StackPanel>
+      <StackPanel x:Name="WzP4" Visibility="Collapsed">
+        <TextBlock Foreground="#E8E8EC" Text="Confira o resumo e conclua:" Margin="0,0,0,8"/>
+        <Border Background="#16161A" BorderBrush="#3A3A44" BorderThickness="1" CornerRadius="4" Padding="10,8">
+          <TextBlock x:Name="WzSum" Foreground="#E8E8EC" FontFamily="Consolas" FontSize="12" Text=""/>
+        </Border>
+        <CheckBox x:Name="WzCenter" Content="abrir a janela centralizada (desmarcado: sempre na última posição usada)" Margin="0,10,0,0"/>
+        <CheckBox x:Name="WzModelAuto" Content="usar modo auto (pergunta simples → modelo rápido; complexa → modelo forte)" Margin="0,8,0,0"/>
+      </StackPanel>
+    </Grid>
+  </DockPanel>
+</Window>
+'@
+        [xml]$wx = Theme-Xaml $wxStr
+        $wz = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($wx))
+        $g = @{}
+        foreach ($n in 'WzClose','WzStep','WzP1','WzP2','WzP3','WzP4','WzUrl','WzKey','WzTest','WzConn',
+                       'WzBench','WzBenchStatus','WzBenchList','WzRec','WzAuto','WzHkCur','WzHkCtrl','WzHkAlt',
+                       'WzHkShift','WzHkKey','WzHkTest','WzHkStatus','WzCenter','WzModelAuto','WzSum',
+                       'WzBack','WzNext','WzFinish') {
+            $g[$n] = $wz.FindName($n)
+        }
+        $script:wzG = $g; $script:wzWin = $wz
+        $script:wzHwnd = [IntPtr]::Zero
+        $script:wzSt = @{ step = 1; ok = $false; ids = @(); rows = @(); times = $false; fast = $null; big = $null; vision = $null; benchBusy = $false }
+        # ---- valores atuais ----
+        try { $g['WzUrl'].Text = (Resolve-ProfileAuth (Get-ActiveProfile)).base } catch { $g['WzUrl'].Text = 'https://api.z.ai/api/anthropic' }
+        $g['WzKey'].Clear()
+        $g['WzAuto'].IsChecked = Get-ZQAutostart
+        $cur = [string]$cfg.hotkey
+        $g['WzHkCur'].Text = 'atual: ' + $cur
+        if ($cur -match '(^|\+)ctrl+')  { $g['WzHkCtrl'].IsChecked = $true }
+        if ($cur -match '(^|\+)alt+')   { $g['WzHkAlt'].IsChecked = $true }
+        if ($cur -match '(^|\+)shift+') { $g['WzHkShift'].IsChecked = $true }
+        $kk = ([string](($cur -split '\+')[-1])).Trim()
+        if ($kk) { $g['WzHkKey'].Text = $kk.ToUpper() }
+        $g['WzCenter'].IsChecked = [bool]$cfg.window.center
+        $g['WzModelAuto'].IsChecked = (([string]$cfg.model) -eq 'auto')
+        # ---- eventos ----
+        $g['WzClose'].Add_Click({ try { $script:wzWin.DialogResult = $false } catch { try { $script:wzWin.Close() } catch {} } })
+        $g['WzTest'].Add_Click({ Wz-TestConn })
+        $g['WzBench'].Add_Click({ Wz-Bench })
+        $g['WzHkTest'].Add_Click({ Wz-HkTest })
+        $g['WzBack'].Add_Click({ Wz-GoStep ([int]$script:wzSt.step - 1) })
+        $g['WzNext'].Add_Click({
+            if ($script:wzSt.step -eq 1 -and -not $script:wzSt.ok) {
+                Wz-TestConn
+                if (-not $script:wzSt.ok) { return }
+            }
+            Wz-GoStep ([int]$script:wzSt.step + 1)
+        })
+        $g['WzFinish'].Add_Click({ Wz-Finish })
+        Wz-GoStep 1
+        if ($window.IsLoaded) { $wz.Owner = $window } else { $wz.WindowStartupLocation = 'CenterScreen' }
+        Add-OpacityWheel $wz
+        $wz.Opacity = $script:baseOpacity
+        try { $null = $wz.ShowDialog() } catch { try { $wz.Close() } catch {}; throw }
+        Log ('wizard: fechado' + $(if ($first) { ' (aberto pelo menu)' } else { ' (primeira execucao)' }))
+    } catch { Log "wizard: $_" }
+}
 
 # ---------- app ----------
 Add-Placeholder
@@ -5118,6 +5630,15 @@ $timer.Start()
 
 $app = [System.Windows.Application]::new()
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
+
+# v3.19: 1a execucao sem chave nenhuma -> assistente de configuracao abre sozinho
+# (assim que a janela pinta; instalador nao precisa mais abrir o json no Bloco de Notas)
+$window.Add_ContentRendered({
+    if ($Hidden) { return }
+    try { $null = Resolve-ProfileAuth (Get-ActiveProfile); return } catch {}
+    Log 'assistente: sem chave configurada — abrindo na 1ª execução'
+    try { Show-SetupWizard $false } catch { Log "wizard(1ª vez): $_" }
+})
 
 if ($Hidden) {
     $window.Opacity = 0

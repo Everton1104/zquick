@@ -22,29 +22,20 @@ if (Test-Path $srcSkills) {
     }
 }
 
-# atalho na Inicializacao ( abre oculto no tray )
-$lnkPath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ZQuick.lnk'
-$ws = New-Object -ComObject WScript.Shell
-$lnk = $ws.CreateShortcut($lnkPath)
-$lnk.TargetPath = Join-Path $dst 'zquick.exe'
-$lnk.Arguments = '-Hidden'
-$lnk.WorkingDirectory = $dst
-$lnk.IconLocation = (Join-Path $dst 'zquick.exe') + ',0'
-$lnk.Save()
+# atalho na Inicializacao NAO e' mais criado aqui: o assistente de configuracao
+# (abre sozinho na 1a execucao) pergunta se voce quer iniciar com o Windows e
+# grava a chave Run — quem ja' tinha o atalho antigo continua funcionando.
 
 Write-Host ''
 Write-Host 'ZQuick instalado em:' $dst -ForegroundColor Green
-Write-Host 'Inicia com o Windows (atalho na Inicializacao).' -ForegroundColor Green
 Write-Host ''
 
-# abre o config p/ colar a chave ANTES do primeiro uso
-$cfg = Join-Path $dst 'zquick.json'
-Write-Host 'Abrindo o zquick.json no Bloco de Notas...' -ForegroundColor Yellow
-Write-Host 'Substitua COLE-AQUI-SUA-CHAVE-ZAI pela sua chave e salve.' -ForegroundColor Yellow
-Start-Process notepad.exe $cfg
-Start-Sleep 1
-
-Write-Host 'Iniciando ZQuick (janela visivel)...' -ForegroundColor Green
+Write-Host 'Iniciando ZQuick...' -ForegroundColor Green
 Start-Process (Join-Path $dst 'zquick.exe')
+Write-Host ''
+Write-Host 'O ASSISTENTE DE CONFIGURACAO abre sozinho na primeira execucao:'
+Write-Host '  - cole a chave da API (z.ai) e teste a conexao'
+Write-Host '  - ele mede a velocidade dos modelos e recomenda o rapido e o forte'
+Write-Host '  - pergunta se inicia com o Windows e confere o atalho Alt+Q'
 Write-Host ''
 Write-Host 'Atalho: Alt+Q.'
