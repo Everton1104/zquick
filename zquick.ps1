@@ -2464,8 +2464,12 @@ $xamlStr = @'
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsHighlighted" Value="True">
+                <Setter Property="Foreground" Value="#C0FFEE"/>
                 <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
-                <Setter TargetName="Bd" Property="TextElement.Foreground" Value="#C0FFEE"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter Property="Foreground" Value="#C0FFEE"/>
+                <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -3488,8 +3492,12 @@ function Show-Settings {
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsHighlighted" Value="True">
+                <Setter Property="Foreground" Value="#C0FFEE"/>
                 <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
-                <Setter TargetName="Bd" Property="TextElement.Foreground" Value="#C0FFEE"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter Property="Foreground" Value="#C0FFEE"/>
+                <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
