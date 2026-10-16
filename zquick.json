@@ -10,11 +10,12 @@
     "systemPrompt":  null,
     "windowOpacity":  0.8500000000000001,
     "alwaysOnTop":  true,
+    "passthrough":  false,
     "window":  {
                    "width":  1024,
                    "height":  576,
-                   "x":  -86,
-                   "y":  -806,
+                   "x":  256,
+                   "y":  120,
                    "center":  true
                },
     "answerFont":  "Cascadia Mono, Consolas",

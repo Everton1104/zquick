@@ -1759,6 +1759,7 @@ public class Engine {
                 if (!File.Exists(path)) return "ERRO: arquivo não encontrado: " + path;
                 string t = File.ReadAllText(path);
                 if (t.Length > 2000000) return "ERRO: arquivo grande demais para edição (2 MB).";
+                bool hadBom; try { byte[] pb = File.ReadAllBytes(path); hadBom = pb.Length >= 3 && pb[0] == 0xEF && pb[1] == 0xBB && pb[2] == 0xBF; } catch { hadBom = false; }
                 int n = CountOcc(t, oldStr);
                 if (n == 0) return EditMissHint(t, oldStr);
                 if (n > 1 && !replAll) return "ERRO: old_str aparece " + n + "× no arquivo. Inclua linhas de contexto ao redor para ficar único, ou envie \"replace_all\":true.";
@@ -1771,7 +1772,7 @@ public class Engine {
                 try { if (File.Exists(full)) { File.Copy(full, full + ".zquick.bak", true); bak = true; } } catch { }
                 string nt = replAll ? t.Replace(oldStr, newStr ?? "")
                     : t.Substring(0, first) + (newStr ?? "") + t.Substring(first + oldStr.Length);
-                File.WriteAllText(full, nt, new UTF8Encoding(false));
+                File.WriteAllText(full, nt, new UTF8Encoding(hadBom)); // preserva BOM original (5.1 le sem-BOM como ANSI)
                 string chk = File.ReadAllText(full);
                 string verify = (string.IsNullOrEmpty(newStr) || chk.Contains(newStr)) ? "verificado na re-leitura" : "ATENÇÃO: new_str ausente na re-leitura";
                 bool oldGone = !chk.Contains(oldStr) || (newStr != null && newStr.Contains(oldStr));
@@ -1786,7 +1787,8 @@ public class Engine {
                 if (!Directory.Exists(d)) Directory.CreateDirectory(d);
                 bool bak = false;
                 try { if (File.Exists(full)) { File.Copy(full, full + ".zquick.bak", true); bak = true; } } catch { }
-                File.WriteAllText(full, content, new UTF8Encoding(false));
+                bool wb; try { byte[] pb2 = File.Exists(full) ? File.ReadAllBytes(full) : new byte[0]; wb = pb2.Length >= 3 && pb2[0] == 0xEF && pb2[1] == 0xBB && pb2[2] == 0xBF; } catch { wb = false; }
+                File.WriteAllText(full, content, new UTF8Encoding(wb)); // preserva BOM se o arquivo ja tinha
                 string verify = File.ReadAllText(full) == content ? "verificado na re-leitura" : "ATENÇÃO: re-leitura difere do enviado";
                 return "OK — gravado: " + full + (bak ? " (versão anterior em " + Path.GetFileName(full) + ".zquick.bak)" : "") + " • " + verify;
             }
@@ -2364,7 +2366,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','TopBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -3623,7 +3625,7 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; Update-LiveAnswer }
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠') { Log ('tool: ' + $m.Text) } }
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|pass:') { Log ('tool: ' + $m.Text) } }
             'sources' { Show-Sources $m.Text }
             'plan' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
