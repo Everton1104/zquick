@@ -2113,6 +2113,9 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "memory_save (grava fato DURÁVEL sobre o usuário/suas máquinas/preferências — vale para as próximas conversas; use quando aprender algo que vai precisar de novo e não for específico da conversa atual) " +
      "e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; os comandos rodam numa SESSÃO PERSISTENTE por conversa: pasta atual, variáveis e funções criadas numa chamada existem na seguinte; " +
      "NUNCA apague arquivos do usuário com run_ps, use file_delete). Se o usuário negar, informe e não repita a mesma ação. " +
+     "REGRA DE AUTO-PRESERVAÇÃO: você roda em .local\bin\zquick — é o app oficial E o repo git desta máquina (config, histórico em history\, skills). " +
+     "NUNCA execute, reinstale ou 'atualize o ZQuick' a partir de Desktop\Kit-ZQuick (é kit de DISTRIBUIÇÃO com config de placeholder e sem chave — rodá-lo destrói a sessão do usuário), " +
+     "NUNCA apague/mova pastas do repo ou de .local, e para reiniciar o app use SOMENTE o zquick.exe/zquick.ps1 do próprio repo. " +
      "Caminho de arquivo ENTRE ASPS na mensagem do usuário = menção (@): o arquivo existe — leia com file_read/file_grep em vez de perguntar o que tem nele. " +
      "Quando a tarefa tiver ambiguidade ou decisão que cabe ao usuário (qual abordagem, qual arquivo, escopo, preferência), pergunte UMA vez com ask_user: " +
      "de 1 a 4 perguntas de uma vez (questions), cada uma com 2-4 opções de label curto + descrição do que a escolha implica; quando estiver comparando artefatos concretos (código, mockup, config), inclua 'preview' nas opções. " +
