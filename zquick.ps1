@@ -43,6 +43,7 @@ $cfg = @{
     systemPrompt  = $null
     windowOpacity = 1.0
     alwaysOnTop   = $false    # v3.9: 📌 janela sobre as outras
+    maxRounds     = 16         # v3.11: teto de rodadas de API por turno (2-40; ao estourar, rodada de fechamento sem tools)
     # Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta
     window        = @{ width = 860; height = 600; x = $null; y = $null; center = $true }
     answerFont    = $null      # null = Cascadia Mono (padrão)
@@ -65,7 +66,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','answerFont','answerFontSize','mcpServers')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','answerFont','answerFontSize','mcpServers')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.window) {
@@ -127,6 +128,7 @@ function Save-Config {
     try {
         $out = [ordered]@{
             profile = $cfg.profile; model = $cfg.model; hotkey = $cfg.hotkey; maxTokens = $cfg.maxTokens
+            maxRounds = $cfg.maxRounds
             searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
             window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
@@ -368,6 +370,7 @@ public class Engine {
     // plano aprovado (#13 modo plano): ate' o fim do turno as confirms rodam sem UI
     int _planId; readonly ManualResetEventSlim _planEv = new ManualResetEventSlim(false); bool _planAnswer; bool _planOk;
     readonly int _maxTokens; readonly string _search;
+    int _maxRounds = 16;   // v3.11: rodadas por turno (SetMaxRounds/config maxRounds)
     bool _srvSearch;   // busca server-side Z.ai (server tool no /v1/messages — sonda 13/10)
     bool _cacheCtl;    // cache_control no system + ultima tool (provado por sonda: 1550->14 input tokens)
     readonly List<string> _history = new List<string>();
@@ -435,6 +438,9 @@ public class Engine {
     // modelo que aceita imagem (null = _big). glm-5.3 NAO enxerga imagem (responde vazio);
     // na Z.ai quem le print e o flash — o perfil define via "visionModel".
     public void SetVisionModel(string m) { lock (_sync) { _vision = string.IsNullOrEmpty(m) ? null : m; } }
+
+    // v3.11: teto de rodadas por turno configuravel (default 16; 2-40 aceito)
+    public void SetMaxRounds(int n) { lock (_sync) { if (n >= 2 && n <= 40) _maxRounds = n; } }
 
     public void Reset() {
         lock (_sync) { _history.Clear(); _compactAsked = false; _planOk = false; try { _cts.Cancel(); } catch {} }
@@ -879,11 +885,13 @@ public class Engine {
                 else { Emit("note", "pré-busca: não voltou a tempo (seguindo fluxo normal)"); }
             }
 
-            string stop = "";
-            // teto de rodadas por turno: 12 (era 6). Tarefas multi-ferramenta (buscar ->
-            // editar -> testar) morriam no meio; tokens seguem limitados pelos tetos de
-            // compactacao do historico (28 msgs / 150 KB / teto duro 40 msgs / 300 KB).
-            for (int round = 0; round < 12; round++) {
+            string stop = ""; bool sawText = false;
+            // teto de rodadas por turno: 16 (era 12 — sonda 16/10: tarefa real de
+            // implementacao morreu NO teto: 6 rodadas de diagnostico + plano + 5
+            // pos-plano = 12; turno terminou sem texto final e o plano pela metade).
+            // Estourando o teto ha' RODADA DE FECHAMENTO sem tools (abaixo). Tokens
+            // seguem limitados pelos tetos de compactacao (28 msgs / 150 KB / 40 / 300 KB).
+            for (int round = 0; round < _maxRounds; round++) {
                 if (ct.IsCancellationRequested) { StopCancelled(); return; }
                 string body;
                 lock (_sync) { body = BuildBody(round == 0 ? sys0 : sys); }
@@ -928,12 +936,37 @@ public class Engine {
                 if (pdfRetry) { round--; continue; }
                 if (ct.IsCancellationRequested) { StopCancelled(); return; }
                 List<string> bj = new List<string>();
-                foreach (Blk b in blocks) { string j2 = BlkJson(b); if (j2 != null) bj.Add(j2); }
+                foreach (Blk b in blocks) {
+                    string j2 = BlkJson(b); if (j2 != null) bj.Add(j2);
+                    if (b.Kind == "text" && !b.Trace && b.Text.Length > 0) sawText = true;
+                }
                 lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"); }
-                if (stop != "tool_use" || ct.IsCancellationRequested) { Emit("done", ""); return; }
+                if (stop != "tool_use" || ct.IsCancellationRequested) {
+                    // fim natural: cortes nunca silenciosos (glm pode voltar vazio quando
+                    // o thinking come o maxTokens — a rodada "termina" sem dizer nada)
+                    if (stop == "max_tokens") Emit("note", "⚠ rodada cortada pelo limite de tokens (aumente maxTokens no ⚙ se faltar conteúdo)");
+                    else if (!sawText) Emit("note", "⚠ o modelo devolveu resposta vazia neste turno — tente reenviar ou um modelo maior no ⚙");
+                    Emit("done", ""); return;
+                }
                 // executa tools — Onda 4: leitura/busca EM PARALELO, o resto serial na ordem
                 string resJson = ExecTools(blocks, ct);
                 lock (_sync) { _history.Add("{\"role\":\"user\",\"content\":[" + resJson + "]}"); }
+            }
+            // ----- teto de rodadas com tools pendentes: RODADA DE FECHAMENTO sem tools
+            // no body (mesma garantia do subagente) — o modelo so' pode devolver texto.
+            // Sem isto o turno morria no meio: tool_results entravam no historico, o loop
+            // saa e ninguem respondia ("pronto" sem posicao final, plano pela metade).
+            if (!ct.IsCancellationRequested) {
+                Emit("status", "⚠ limite de rodadas — fechando o turno…");
+                lock (_sync) { _history.Add("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":" +
+                    J("[LIMITE DE RODADAS ATINGIDO — as ferramentas foram DESLIGADAS nesta chamada. Responda agora ao usuário, em texto: (1) o que você já executou nesta tarefa e o resultado de cada ação (OK/erro), (2) o que ficou faltando do plano, (3) o próximo passo sugerido. NÃO invente resultado — baseie-se apenas nos tool_results acima.]") + "}]}"); }
+                try {
+                    string stop2; bool streamed2;
+                    List<Blk> blocks2 = StreamOnce(BuildBody(sys, false), ct, out stop2, out streamed2);
+                    var bj2 = new List<string>();
+                    foreach (Blk b in blocks2) { string j2 = BlkJson(b); if (j2 != null) bj2.Add(j2); }
+                    if (bj2.Count > 0) lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj2) + "]}"); }
+                } catch (Exception ex2) { if (!ct.IsCancellationRequested) Emit("note", "fechamento falhou: " + Trunc(ex2.Message, 120)); }
             }
             Emit("done", "");
         } catch (Exception ex) {
@@ -1292,7 +1325,10 @@ public class Engine {
         return o;
     }
 
-    string BuildBody(string sys) {
+    string BuildBody(string sys) { return BuildBody(sys, true); }
+    // v3.11: withTools=false => "tools":[] (rodada de fechamento — o modelo so'
+    // responde texto; mesmo formato que o subagente ja' usa no relatorio final)
+    string BuildBody(string sys, bool withTools) {
         var b = new StringBuilder();
         string vm = !_auto ? _model : (_useBig ? _big : (_useVision ? (_vision ?? _big) : _model));
         // system como array + cache_control no prefixo gordo: sonda 13/10 provou
@@ -1334,6 +1370,7 @@ public class Engine {
             int last = tools.Count - 1;
             tools[last] = tools[last].Substring(0, tools[last].Length - 1) + ",\"cache_control\":{\"type\":\"ephemeral\"}}";
         }
+        if (!withTools) tools.Clear();   // fechamento do turno: "tools":[] — so' texto sai
         b.Append("{\"model\":\"").Append(vm)
          .Append("\",\"max_tokens\":").Append(_maxTokens)
          .Append(",\"stream\":true,\"system\":").Append(sysJson)
@@ -1573,6 +1610,40 @@ public class Engine {
     }
 
     // ---------- acoes locais no Windows (tools dedicadas + run_ps) ----------
+    // v3.11: file_edit errou o old_str -> devolve as linhas "quase iguais" do arquivo.
+    // Caso real (16/10): o modelo copiou o trecho do output do run_ps, onde o emoji
+    // do comentario virou "??" (ANSI vs UTF-8) — o edit nunca casa. Com a dica ele
+    // refaz em 1 rodada com o trecho REAL, sem file_read inteiro + tentativa as cegas.
+    static string NormLine(string s) {
+        var sb = new StringBuilder(); bool q = false, ws = false;
+        foreach (char c in s) {
+            if (c == '?' || c < 33 || c > 126) { if (!q) { sb.Append('?'); q = true; } ws = false; continue; }   // nao-ASCII/controle -> '?' colapsado
+            q = false;
+            if (c == ' ' || c == '\t') { if (!ws) { sb.Append(' '); ws = true; } continue; }                      // branco colapsado
+            ws = false;
+            sb.Append(char.ToLowerInvariant(c));
+        }
+        return sb.ToString().Trim();
+    }
+    static string EditMissHint(string t, string oldStr) {
+        string firstLine = oldStr.Replace("\r\n", "\n").Split('\n')[0];
+        string probe = NormLine(firstLine);
+        if (probe.Length < 10)
+            return "ERRO: old_str não encontrado no arquivo. Copie o trecho EXATO com file_read (indentação conta) ou localize com file_grep.";
+        var sb = new StringBuilder(); int found = 0, lineNo = 1;
+        foreach (string ln in t.Replace("\r\n", "\n").Split('\n')) {
+            if (NormLine(ln).IndexOf(probe, StringComparison.Ordinal) >= 0) {
+                sb.Append("\n").Append(lineNo).Append(": ").Append(Trunc(ln.TrimEnd(), 120));
+                if (++found >= 3) break;
+            }
+            lineNo++;
+        }
+        return "ERRO: old_str não encontrado no arquivo. DICA: trecho copiado do output do run_ps pode ter acentos/emojis corrompidos (ANSI×UTF-8) — copie do file_read."
+            + (found > 0
+                ? " Linha(s) equivalente(s) — copie EXATAMENTE daqui (indentação conta):" + sb.ToString()
+                : " Copie o trecho EXATO com file_read (indentação conta) ou localize com file_grep.");
+    }
+
     string LocalTool(string name, Dictionary<string, object> inp, CancellationToken ct) {
         string p = H.S(inp, "path");
         try {
@@ -1660,7 +1731,7 @@ public class Engine {
                 string t = File.ReadAllText(path);
                 if (t.Length > 2000000) return "ERRO: arquivo grande demais para edição (2 MB).";
                 int n = CountOcc(t, oldStr);
-                if (n == 0) return "ERRO: old_str não encontrado no arquivo. Copie o trecho EXATO com file_read (indentação conta) ou localize com file_grep.";
+                if (n == 0) return EditMissHint(t, oldStr);
                 if (n > 1 && !replAll) return "ERRO: old_str aparece " + n + "× no arquivo. Inclua linhas de contexto ao redor para ficar único, ou envie \"replace_all\":true.";
                 int first = t.IndexOf(oldStr, StringComparison.Ordinal);
                 int line = 1; for (int i = 0; i < first; i++) if (t[i] == '\n') line++;
@@ -2053,6 +2124,7 @@ function New-EngineFromProfile {
         [string]$p.fastModel, [string]$p.bigModel,
         [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue, [bool]$cfg.promptCache)
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
+    if ($cfg.maxRounds) { $eng.SetMaxRounds([int]$cfg.maxRounds) }   # v3.11: teto de rodadas por turno (default 16)
     $eng.MemPath = $memFile
     # Onda 5: skills .md ao lado do app — lista {name,file} entregue ao engine
     # (skill_read so' entra nas tools quando existir pelo menos uma)
@@ -3505,7 +3577,7 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; Update-LiveAnswer }
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖') { Log ('tool: ' + $m.Text) } }
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠') { Log ('tool: ' + $m.Text) } }
             'sources' { Show-Sources $m.Text }
             'plan' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }

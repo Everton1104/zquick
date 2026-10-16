@@ -10,7 +10,11 @@ $log = Join-Path $env:TEMP 'zquick.log'
 $procId = (Get-Process zquick | Select-Object -First 1).Id
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $procId)
-$win = @($root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) | Where-Object { $_.Current.Name -like '*ZQuick*' -and $_.Current.Name -notlike '*hist*' } | Select-Object -First 1
+$win = $null
+for ($try = 0; $try -lt 4 -and -not $win; $try++) {
+    $win = @($root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) | Where-Object { $_.Current.Name -like '*ZQuick*' -and $_.Current.Name -notlike '*hist*' } | Select-Object -First 1
+    if (-not $win) { [K.I]::keybd_event(0x12,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 70; [K.I]::keybd_event(0x51,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 70; [K.I]::keybd_event(0x51,0,2,[UIntPtr]::Zero); Start-Sleep -Milliseconds 70; [K.I]::keybd_event(0x12,0,2,[UIntPtr]::Zero); Start-Sleep -Milliseconds 900 }
+}
 if (-not $win) { throw 'janela nao achada' }
 $mark = [IO.File]::ReadAllText($log).Length
 $inCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'InputBox')
@@ -27,7 +31,7 @@ while ((Get-Date) -lt $deadline -and -not $done) {
     Start-Sleep -Milliseconds 700
     try { $t = [IO.File]::ReadAllText($log).Substring($mark) } catch { continue }
     if ($t -match 'engine: HTTP') { $err = $true; "ERRO HTTP: $($Matches[0])"; break }
-    if ($t -match 'respondido: (\d+) chars') { $done = $true; "RESPONDEU: $($Matches[1]) chars — sem erro HTTP" }
+    if ($t -match 'respondido: (\d+) chars') { $done = $true; "RESPONDEU: $($Matches[1]) chars - sem erro HTTP" }
 }
 # limpeza: nova conversa + esconde
 [K.I]::keybd_event(0x11,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 70

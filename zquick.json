@@ -3,6 +3,7 @@
     "model":  "glm-5.3",
     "hotkey":  "alt+q",
     "maxTokens":  4096,
+    "maxRounds":  16,
     "searchEngine":  "zai-server",
     "promptCache":  true,
     "hideOnBlur":  false,
@@ -10,14 +11,14 @@
     "windowOpacity":  0.8500000000000001,
     "alwaysOnTop":  true,
     "window":  {
-                   "width":  976,
-                   "height":  756,
-                   "x":  288,
-                   "y":  -954,
+                   "width":  819,
+                   "height":  461,
+                   "x":  358,
+                   "y":  178,
                    "center":  true
                },
     "answerFont":  "Cascadia Mono, Consolas",
-    "answerFontSize":  16.0,
+    "answerFontSize":  14,
     "theme":  {
                   "bg":  "#0C0C0C",
                   "card":  "#16161A",
@@ -62,7 +63,8 @@
                                 "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=462; $i -le 560; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
                                 "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; $i=0; foreach($l in $lines){ $i++; if($l -match \u0027SetAllowRules|New-Engine|NewEngine|engine = |New-Object.*Engine|\\[Engine\\]::new\u0027){ \"{0}: {1}\" -f $i, $l.Trim() } }",
                                 "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2140; $i -le 2230; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
-                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2000; $i -le 2070; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }"
+                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2000; $i -le 2070; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
+                                "$k=\u0027C:\\Users\\EVTU-DELL\\OneDrive\\Desktop\\Kit-ZQuick\u0027; if(Test-Path $k){ Select-String -Path \"$k\\*.ps1\",\"$k\\*.txt\" -Pattern \u0027passthrough\u0027 -SimpleMatch -ErrorAction SilentlyContinue | Select-Object -First 5 Filename,LineNumber; Get-ChildItem $k -Recurse -Include *.ps1 | Select-Object FullName,LastWriteTime }"
                             ]
               },
     "mcpServers":  null
