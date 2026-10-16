@@ -22,38 +22,23 @@
     "answerFont":  "Cascadia Mono, Consolas",
     "answerFontSize":  14,
     "theme":  {
-                  "bg":  "#0E0E0E",
-                  "card":  "#26262B",
-                  "panel":  "#2A2A30",
-                  "input":  "#16161A",
-                  "border":  "#3A3A44",
-                  "fg":  "#63FF33",
-                  "dim":  "#6E6E7A",
-                  "status":  "#9A9AA5",
-                  "q":  "#C9C2FF",
-                  "accent":  "#8B9CF6",
-                  "accent2":  "#8B7CF6",
-                  "code":  "#A9DCFC",
-                  "trayA":  "#8B7CF6",
-                  "trayB":  "#6358C8"
+                  "bg":  "#000000",
+                  "card":  "#0A140A",
+                  "panel":  "#0E1A0E",
+                  "input":  "#040804",
+                  "border":  "#1F4A1F",
+                  "fg":  "#2EFF2E",
+                  "dim":  "#1E8A1E",
+                  "status":  "#7CD97C",
+                  "q":  "#B4FFB4",
+                  "accent":  "#00FF41",
+                  "accent2":  "#39FF14",
+                  "code":  "#98FB98",
+                  "trayA":  "#00FF41",
+                  "trayB":  "#008000"
               },
     "themes":  {
-                   "teste":  {
-                                 "bg":  "#0E0E0E",
-                                 "card":  "#26262B",
-                                 "panel":  "#2A2A30",
-                                 "input":  "#16161A",
-                                 "border":  "#3A3A44",
-                                 "fg":  "#63FF33",
-                                 "dim":  "#6E6E7A",
-                                 "status":  "#9A9AA5",
-                                 "q":  "#C9C2FF",
-                                 "accent":  "#8B9CF6",
-                                 "accent2":  "#8B7CF6",
-                                 "code":  "#A9DCFC",
-                                 "trayA":  "#8B7CF6",
-                                 "trayB":  "#6358C8"
-                             }
+
                },
     "profiles":  {
                      "zai":  {

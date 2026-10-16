@@ -138,6 +138,17 @@ function HexTo-DrawColor([string]$h) {
     $h = ([string]$h).TrimStart('#')
     [System.Drawing.Color]::FromArgb([Convert]::ToInt32($h.Substring(0,2),16), [Convert]::ToInt32($h.Substring(2,2),16), [Convert]::ToInt32($h.Substring(4,2),16))
 }
+# v3.16.2: fonte com contraste automatico p/ botao em destaque (preto em fundo claro,
+# branco em fundo escuro) — sem isso o matrix ficava verde-sobre-verde (invisivel)
+function Get-ContrastFg([string]$hex) {
+    try {
+        $c = [System.Windows.Media.ColorConverter]::ConvertFromString(([string]$hex).Trim())
+        if ((0.299 * $c.R + 0.587 * $c.G + 0.114 * $c.B) -gt 140) {
+            return [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Colors]::Black)
+        }
+    } catch {}
+    [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Colors]::White)
+}
 function Save-Config {
     try {
         $out = [ordered]@{
@@ -2438,6 +2449,7 @@ if ($cfg.windowOpacity -and [double]$cfg.windowOpacity -gt 0 -and [double]$cfg.w
 # ---------- v3.9: 📌 sempre no topo + Ctrl+roda = opacidade ao vivo ----------
 function Set-TopBtnVisual([bool]$on) {
     $TopBtn.Background = $(if ($on) { $T.accent } else { $T.panel })
+    $TopBtn.Foreground = $(if ($on) { Get-ContrastFg $T.accent } else { $T.fg })
     $TopBtn.ToolTip = $(if ($on) { 'sempre no topo: ATIVO — clique para desligar' } else { 'sempre no topo — manter a janela sobre as outras' })
 }
 if ($cfg.alwaysOnTop) { $window.Topmost = $true; Set-TopBtnVisual $true }
@@ -2445,6 +2457,7 @@ $TopBtn.Add_Click({ Set-Topmost (-not $window.Topmost) })
 # v3.12: ⚡ passthrough — GateConfirm aprova tudo enquanto ligado (só o botão alterna; persiste no json)
 function Set-PassBtnVisual([bool]$on) {
     $PassBtn.Background = $(if ($on) { $T.accent } else { $T.panel })
+    $PassBtn.Foreground = $(if ($on) { Get-ContrastFg $T.accent } else { $T.fg })
     $PassBtn.ToolTip = $(if ($on) { 'passthrough: ATIVO — ações rodam SEM confirmação; clique para desligar' } else { 'passthrough — aprovar ações (edits/comandos) sem confirmar; clique para ligar' })
 }
 function Set-Passthrough([bool]$on) {
@@ -3589,7 +3602,7 @@ function Show-Settings {
                         'status'  { foreach ($s3 in $script:setPrev['status']) { $s3.Foreground = $b } }
                         'q'       { $script:setPrev['q'].Foreground = $b }
                         'code'    { $script:setPrev['code'].Foreground = $b }
-                        'accent'  { $script:setPrev['accent'].Background = $b }
+                        'accent'  { $script:setPrev['accent'].Background = $b; $script:setPrev['accent'].Foreground = (Get-ContrastFg $hx) }
                         'accent2' { $script:setPrev['accent2'].Foreground = $b }
                         'trayA'   { $script:setPrev['tray'].GradientStops[0].Color = $b.Color }
                         'trayB'   { $script:setPrev['tray'].GradientStops[1].Color = $b.Color }
