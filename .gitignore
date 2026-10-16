@@ -10,6 +10,8 @@ kit/zquick.exe
 kit/zquick.ps1
 
 # sobras de teste / log
+# lixo de apps que rodaram com cwd no repo (ex: cache do Adobe)
+Local/
 teste-arquivo.txt
 *.log
 
