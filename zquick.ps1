@@ -45,6 +45,7 @@ $cfg = @{
     alwaysOnTop   = $false    # v3.9: 📌 janela sobre as outras
     passthrough   = $false    # pula GateConfirm (confirmacoes de ferramenta) - NA MÃO, nunca via LLM
     maxRounds     = 16         # v3.11: teto de rodadas de API por turno (2-40; ao estourar, rodada de fechamento sem tools)
+    autoCompact   = $false     # v3.13: compacta a conversa automaticamente (sem perguntar) ao passar do limiar
     # Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta
     window        = @{ width = 860; height = 600; x = $null; y = $null; center = $true }
     answerFont    = $null      # null = Cascadia Mono (padrão)
@@ -67,7 +68,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','autoCompact','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.window) {
@@ -130,6 +131,7 @@ function Save-Config {
         $out = [ordered]@{
             profile = $cfg.profile; model = $cfg.model; hotkey = $cfg.hotkey; maxTokens = $cfg.maxTokens
             maxRounds = $cfg.maxRounds
+            autoCompact = [bool]$cfg.autoCompact
             searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
             passthrough = $cfg.passthrough
@@ -375,6 +377,9 @@ public class Engine {
     int _maxRounds = 16;   // v3.11: rodadas por turno (SetMaxRounds/config maxRounds)
     volatile bool _passThrough;   // modo passthrough: GateConfirm aprova tudo (nao confundir com allow/auto)
     int _mtNeed = 0;       // v3.11.1: maxTokens que a conversa precisou (thinking comendo o limite — memorizado no turno seguinte)
+    bool _autoCompact;     // v3.13: compacta sem perguntar quando a conversa passa do limiar
+    List<string> _full = new List<string>();   // v3.13: historico COMPLETO da conversa (disco/render) — _history e' a versao enviada a API
+    int _confAuto;   // v3.13: 1 = usuario escolheu "auto-compactar" no confirm de compactacao
     bool _srvSearch;   // busca server-side Z.ai (server tool no /v1/messages — sonda 13/10)
     bool _cacheCtl;    // cache_control no system + ultima tool (provado por sonda: 1550->14 input tokens)
     readonly List<string> _history = new List<string>();
@@ -446,9 +451,10 @@ public class Engine {
     // v3.11: teto de rodadas por turno configuravel (default 16; 2-40 aceito)
     public void SetMaxRounds(int n) { lock (_sync) { if (n >= 2 && n <= 40) _maxRounds = n; } }
     public void SetPassthrough(bool on) { _passThrough = on; }   // liga/desliga em runtime (botao da toolbar)
+    public void SetAutoCompact(bool on) { _autoCompact = on; }   // v3.13: autocompact (config autoCompact ou botao do confirm)
 
     public void Reset() {
-        lock (_sync) { _history.Clear(); _compactAsked = false; _planOk = false; _mtNeed = 0; try { _cts.Cancel(); } catch {} }
+        lock (_sync) { _history.Clear(); _full.Clear(); _compactAsked = false; _planOk = false; _mtNeed = 0; try { _cts.Cancel(); } catch {} }
         KillShell();   // conversa nova = sessao de shell nova
     }
     public void Cancel() { lock (_sync) { try { _cts.Cancel(); } catch {} } }
@@ -492,6 +498,11 @@ public class Engine {
         Emit("allow", "{\"tool\":" + J(tool) + ",\"subject\":" + J(subject) + "}");
     }
 
+    // v3.13: botao "auto-compactar" do confirm de compactacao — aprova E liga autocompact
+    public void ConfirmAuto(int id) {
+        lock (_sync) { if (id != _confirmId) return; _confAuto = 1; _confOk = true; _confEv.Set(); }
+    }
+
     // ---------- modo plano (#13): usuario aprova UMA vez, acoes seguintes sem confirm ----------
     public void PlanDecide(int id, bool ok) {
         lock (_sync) { if (id != _planId) return; _planAnswer = ok; _planEv.Set(); }
@@ -518,6 +529,9 @@ public class Engine {
 
     // historico de conversa (snapshots brutos do _history) p/ salvar/retomar
     public List<string> GetHistory() { lock (_sync) { return new List<string>(_history); } }
+    // v3.13: conversa COMPLETA (o que vai pro disco e pro render) — a compactacao
+    // resume so' a copia que viaja na API; _full nunca encolhe
+    public List<string> GetFull() { lock (_sync) { return new List<string>(_full); } }
     // fragmento de historico tem que fechar todas as chaves/colchetes (fora de strings).
     // O MiniJson e' leniente com truncamento, entao a validacao e' por balanceamento.
     static bool FragOk(string s) {
@@ -540,11 +554,11 @@ public class Engine {
         int fixedN = 0, bad = 0;
         lock (_sync) {
             if (_busy == 1) return;
-            _history.Clear(); _compactAsked = false;
+            _history.Clear(); _full.Clear(); _compactAsked = false;
             if (msgs != null) foreach (string m in msgs) {
                 if (m == null) { bad++; continue; }
-                if (FragOk(m)) _history.Add(m);
-                else if (FragOk(m + "]}")) { _history.Add(m + "]}"); fixedN++; }
+                if (FragOk(m)) { _history.Add(m); _full.Add(m); }
+                else if (FragOk(m + "]}")) { string f2 = m + "]}"; _history.Add(f2); _full.Add(f2); fixedN++; }
                 else bad++;
             }
         }
@@ -593,6 +607,27 @@ public class Engine {
         bool ok = _confEv.IsSet && _confOk && !ct.IsCancellationRequested;
         Emit("confirm", "{\"hide\":true}");
         return ok;
+    }
+
+    // v3.13: confirm de compactacao com 3 saidas — 0 cancelar, 1 compactar agora,
+    // 2 compactar E ligar autocompact (persistido pela UI no zquick.json)
+    int GateCompact(string detail, CancellationToken ct) {
+        if (_autoCompact || _passThrough) return 1;
+        int id;
+        lock (_sync) { _confirmId++; id = _confirmId; _confOk = false; _confAuto = 0; _confEv.Reset(); }
+        Emit("confirm", "{\"id\":" + id + ",\"title\":" + J("Compactar conversa")
+            + ",\"detail\":" + J(detail) + ",\"auto\":true}");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true) {
+            if (ct.IsCancellationRequested) break;
+            if (_confEv.Wait(300)) break;
+            if (sw.Elapsed.TotalSeconds > 45) { Emit("status", "confirmação expirou — compactação cancelada"); break; }
+        }
+        bool ok; int autoSel;
+        lock (_sync) { ok = _confEv.IsSet && _confOk; autoSel = _confAuto; }
+        Emit("confirm", "{\"hide\":true}");
+        if (!ok || ct.IsCancellationRequested) return 0;
+        return autoSel == 1 ? 2 : 1;
     }
 
     // ---------- pergunta de multipla escolha ao usuario (decisao, estilo AskUserQuestion do Claude Code) ----------
@@ -714,7 +749,7 @@ public class Engine {
             nh.Add("{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":" + J(summary) + "}]}");
             nh.AddRange(recent);
             lock (_sync) { _history.Clear(); _history.AddRange(nh); }
-            Emit("note", "conversa compactada: " + msgs.Count + " → " + nh.Count + " mensagens");
+            Emit("note", "conversa compactada: " + msgs.Count + " → " + nh.Count + " mensagens (histórico completo continua salvo)");
         } catch (Exception ex) { Emit("note", "compactação: " + ex.Message); }
     }
 
@@ -827,18 +862,28 @@ public class Engine {
                     Emit("status", "↗ geração longa — usando " + _big);
                 }
             }
-            // conversa crescendo: PERGUNTA se compacta (resumo) antes de bater no teto duro
+            // conversa crescendo: compacta (resumo) antes de bater no teto duro. v3.13:
+            // o resumo e' SO' para a API — o historico COMPLETO (_full) continua salvo no disco
             bool askCompact = false; int msgN = 0; double kb = 0;
             lock (_sync) {
                 double chars = 0; foreach (string h in _history) chars += h.Length;
-                if (_history.Count > 40 || chars > 300000) { _history.Clear(); _compactAsked = false; Emit("note", "contexto antigo descartado"); }
+                if (_history.Count > 40 || chars > 300000) { _history.Clear(); _compactAsked = false; Emit("note", "contexto antigo descartado (o histórico completo continua salvo)"); }
                 else if (!_compactAsked && (_history.Count > 28 || chars > 150000)) {
                     _compactAsked = true; askCompact = true; msgN = _history.Count; kb = chars / 1024;
                 }
             }
-            if (askCompact && GateConfirm(null, null, "Compactar conversa",
-                string.Format("{0} mensagens • {1:0} KB. Posso resumir as trocas antigas (mantendo as últimas intactas) para a conversa continuar leve?", msgN, kb), null, ct))
-                CompactHistory(ct);
+            if (askCompact) {
+                if (_autoCompact) { Emit("status", "🧹 autocompact: resumindo trocas antigas…"); CompactHistory(ct); }
+                else {
+                    int cc = GateCompact(string.Format("{0} mensagens • {1:0} KB. Resumir as trocas antigas (mantendo as últimas intactas) para a conversa continuar leve? O histórico completo continua salvo — o resumo é só para a API.", msgN, kb), ct);
+                    if (cc == 1) CompactHistory(ct);
+                    else if (cc == 2) {
+                        _autoCompact = true;
+                        Emit("status", "🧹 autocompact LIGADO — gravado no zquick.json; resumindo…");
+                        CompactHistory(ct);
+                    }
+                }
+            }
             var ub = new StringBuilder();
             var ubNoPdf = new StringBuilder();
             if (imgB64 != null) foreach (string b in imgB64) {
@@ -853,8 +898,9 @@ public class Engine {
                 string fb = ",{\"type\":\"text\",\"text\":" + J("[ARQUIVO ANEXADO: " + tf[0] + " — o conteúdo completo já está AQUI embaixo, dentro desta mensagem. NÃO procure este arquivo no disco (não use file_list/file_read nele); responda a partir do texto injetado.]\n\n" + tf[1]) + "}";
                 ub.Append(fb); ubNoPdf.Append(fb);
             }
+            string uj = "{\"role\":\"user\",\"content\":[" + ub + "]}";
             lock (_sync) {
-                _history.Add("{\"role\":\"user\",\"content\":[" + ub + "]}");
+                _history.Add(uj); _full.Add(uj);
                 _pdfFallback = (pdfFiles != null && pdfFiles.Count > 0) ? "{\"role\":\"user\",\"content\":[" + ubNoPdf + "]}" : null;
             }
 
@@ -925,7 +971,7 @@ public class Engine {
                         }
                         // endpoint rejeitou os document blocks de PDF -> reenvia sem (1x)
                         if (_pdfFallback != null && ex.Message.StartsWith("HTTP 400")) {
-                            lock (_sync) { if (_history.Count > 0) _history[_history.Count - 1] = _pdfFallback; _pdfFallback = null; }
+                            lock (_sync) { if (_history.Count > 0) _history[_history.Count - 1] = _pdfFallback; if (_full.Count > 0) _full[_full.Count - 1] = _pdfFallback; _pdfFallback = null; }
                             Emit("note", "PDF rejeitado pelo endpoint — reenviando sem o PDF");
                             pdfRetry = true; break;
                         }
@@ -955,7 +1001,7 @@ public class Engine {
                     if (b.Kind == "tool_use") roundTool = true;
                 }
                 // content vazio (so' thinking truncado) tambem nao entra: a API rejeita
-                if (bj.Count > 0) lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"); }
+                if (bj.Count > 0) { string aj = "{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"; lock (_sync) { _history.Add(aj); _full.Add(aj); } }
                 // glm-5.3: o thinking pode comer o maxTokens INTEIRO e a rodada voltar
                 // so' com raciocinio truncado + stop=max_tokens — zero texto, zero tool
                 // (caso 16/10 11:12: "pronto" com resposta VAZIA). Refaz a rodada com
@@ -979,7 +1025,8 @@ public class Engine {
                 }
                 // executa tools — Onda 4: leitura/busca EM PARALELO, o resto serial na ordem
                 string resJson = ExecTools(okBlocks, ct);
-                lock (_sync) { _history.Add("{\"role\":\"user\",\"content\":[" + resJson + "]}"); }
+                string rj = "{\"role\":\"user\",\"content\":[" + resJson + "]}";
+                lock (_sync) { _history.Add(rj); _full.Add(rj); }
             }
             // ----- teto de rodadas com tools pendentes: RODADA DE FECHAMENTO sem tools
             // no body (mesma garantia do subagente) — o modelo so' pode devolver texto.
@@ -987,14 +1034,15 @@ public class Engine {
             // saa e ninguem respondia ("pronto" sem posicao final, plano pela metade).
             if (!ct.IsCancellationRequested) {
                 Emit("status", "⚠ limite de rodadas — fechando o turno…");
-                lock (_sync) { _history.Add("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":" +
-                    J("[LIMITE DE RODADAS ATINGIDO — as ferramentas foram DESLIGADAS nesta chamada. Responda agora ao usuário, em texto: (1) o que você já executou nesta tarefa e o resultado de cada ação (OK/erro), (2) o que ficou faltando do plano, (3) o próximo passo sugerido. NÃO invente resultado — baseie-se apenas nos tool_results acima.]") + "}]}"); }
+                string lim = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":" +
+                    J("[LIMITE DE RODADAS ATINGIDO — as ferramentas foram DESLIGADAS nesta chamada. Responda agora ao usuário, em texto: (1) o que você já executou nesta tarefa e o resultado de cada ação (OK/erro), (2) o que ficou faltando do plano, (3) o próximo passo sugerido. NÃO invente resultado — baseie-se apenas nos tool_results acima.]") + "}]}";
+                lock (_sync) { _history.Add(lim); _full.Add(lim); }
                 try {
                     string stop2; bool streamed2;
                     List<Blk> blocks2 = StreamOnce(BuildBody(sys, false), ct, out stop2, out streamed2);
                     var bj2 = new List<string>();
                     foreach (Blk b in blocks2) { string j2 = BlkJson(b); if (j2 != null) bj2.Add(j2); }
-                    if (bj2.Count > 0) lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj2) + "]}"); }
+                    if (bj2.Count > 0) { string aj2 = "{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj2) + "]}"; lock (_sync) { _history.Add(aj2); _full.Add(aj2); } }
                 } catch (Exception ex2) { if (!ct.IsCancellationRequested) Emit("note", "fechamento falhou: " + Trunc(ex2.Message, 120)); }
             }
             Emit("done", "");
@@ -2156,6 +2204,7 @@ function New-EngineFromProfile {
         [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue, [bool]$cfg.promptCache)
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
     if ($cfg.maxRounds) { $eng.SetMaxRounds([int]$cfg.maxRounds) }   # v3.11: teto de rodadas por turno (default 16)
+    if ($cfg.autoCompact) { $eng.SetAutoCompact($true) }   # v3.13: compacta sem perguntar
     if ($cfg.passthrough) { $eng.SetPassthrough($true) }   # v3.12: passthrough memorizado no json volta ligado
     $eng.MemPath = $memFile
     # Onda 5: skills .md ao lado do app — lista {name,file} entregue ao engine
@@ -2281,7 +2330,7 @@ $xamlStr = @'
           <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="TopBtn" Content="📌" Margin="8,0,0,0" ToolTip="sempre no topo — manter a janela sobre as outras" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <Button x:Name="PassBtn" Content="🡒" Margin="8,0,0,0" ToolTip="passthrough — aprovar ações (edits/comandos) sem confirmar; clica AQUI para ligar/desligar" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <Button x:Name="PassBtn" Content="⚡" Margin="8,0,0,0" ToolTip="passthrough — aprovar ações (edits/comandos) sem confirmar; clica AQUI para ligar/desligar" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="SettingsBtn" Content="⚙" Margin="14,0,0,0" ToolTip="Configurações — chaves, janela, aparência, geral" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MinBtn" Content="—" ToolTip="ocultar na bandeja (Alt+Q traz de volta)" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MaxBtn" Content="▢" ToolTip="maximizar / restaurar" Style="{StaticResource ChromeBtn}"/>
@@ -2382,7 +2431,7 @@ function Set-TopBtnVisual([bool]$on) {
 }
 if ($cfg.alwaysOnTop) { $window.Topmost = $true; Set-TopBtnVisual $true }
 $TopBtn.Add_Click({ Set-Topmost (-not $window.Topmost) })
-# v3.12: 🡒 passthrough — GateConfirm aprova tudo enquanto ligado (só o botão alterna; persiste no json)
+# v3.12: ⚡ passthrough — GateConfirm aprova tudo enquanto ligado (só o botão alterna; persiste no json)
 function Set-PassBtnVisual([bool]$on) {
     $PassBtn.Background = $(if ($on) { $T.accent } else { $T.panel })
     $PassBtn.ToolTip = $(if ($on) { 'passthrough: ATIVO — ações rodam SEM confirmação; clique para desligar' } else { 'passthrough — aprovar ações (edits/comandos) sem confirmar; clique para ligar' })
@@ -2392,7 +2441,7 @@ function Set-Passthrough([bool]$on) {
     $cfg.passthrough = $on
     Set-PassBtnVisual $on
     Save-Config
-    $StatusText.Text = $(if ($on) { '🡒 passthrough: ações sem confirmação' } else { '🡒 passthrough: desligado' })
+    $StatusText.Text = $(if ($on) { '⚡ passthrough: ações sem confirmação' } else { '⚡ passthrough: desligado' })
     Log ("chrome: passthrough {0}" -f $on)
 }
 if ($cfg.passthrough) { Set-PassBtnVisual $true }
@@ -2970,15 +3019,22 @@ $script:convFile = $null
 function Save-History {
     try {
         if ($null -eq $script:engine -or -not $script:convFile) { return }
-        $msgs = @($script:engine.GetHistory())
+        $msgs = @($script:engine.GetFull())   # v3.13: disco guarda a conversa COMPLETA — a compactação resume só a cópia da API
         if ($msgs.Count -lt 2) { return }
         # salva TUDO, inclusive imagens (base64) — retomar devolve os pixels ao modelo
         $q = [string]$script:curQuestion
         if (-not $q) { $q = '(imagem)' }
+        # renomear/favoritar (v3.13): campos viajam junto quando a conversa retomada é regravada
+        $hfav = $false; $htitle = $null
+        if ($script:convResumed -and (Test-Path $script:convFile)) {
+            try { $old = Get-Content -Path $script:convFile -Raw -Encoding utf8 | ConvertFrom-Json; $hfav = [bool]$old.fav; $htitle = [string]$old.title } catch {}
+        }
         $obj = [ordered]@{
             time = (Get-Date).ToString('s'); profile = [string]$cfg.profile; model = [string]$cfg.model
             q = $q; a = $script:lastAnswer; msgs = @($msgs)
         }
+        if ($hfav) { $obj.fav = $true }
+        if ($htitle) { $obj.title = $htitle }
         New-Item -ItemType Directory -Force $histDir | Out-Null
         [pscustomobject]$obj | ConvertTo-Json -Depth 4 | Set-Content -Path $script:convFile -Encoding utf8
         # poda: 200 itens mais recentes OU teto de ~50MB (imagem em base64 engorda)
@@ -3311,6 +3367,15 @@ function Show-Settings {
             $bx.Add_TextChanged({ param($s2, $e2)
                 try { $s2.Tag.Fill = ([System.Windows.Media.ColorConverter]::ConvertFromString($s2.Text)) -as [System.Windows.Media.SolidColorBrush] } catch {}
             })
+            # v3.13: clicar no swatch abre o seletor visual (arco-iris) — o hex escolhido volta pra caixa
+            $swRect.Tag = $bx
+            $swRect.Cursor = [System.Windows.Input.Cursors]::Hand
+            $swRect.ToolTip = 'clique para escolher a cor no seletor visual'
+            $swRect.Add_MouseLeftButtonDown({ param($s2, $e2)
+                $hex2 = Show-ColorPicker ([string]$s2.Tag.Text)
+                if ($hex2) { $s2.Tag.Text = $hex2 }
+                $e2.Handled = $true
+            }.GetNewClosure())
             $null = $row.Children.Add($swRect); $null = $row.Children.Add($lbl); $null = $row.Children.Add($bx)
             $null = $g['SetColors'].Children.Add($row)
             $boxes[$k] = $bx
@@ -3465,6 +3530,178 @@ function Show-Settings {
     } catch { Log "settings: $_" }
 }
 
+# ---------- prompt de texto simples (v3.13: renomear conversa do historico) ----------
+function Show-InputPrompt([string]$title, [string]$label, [string]$initial) {
+    $w = [System.Windows.Window]::new()
+    $w.Title = $title; $w.Width = 420; $w.SizeToContent = 'Height'
+    $w.WindowStartupLocation = 'CenterOwner'; $w.ResizeMode = 'NoResize'
+    $w.ShowInTaskbar = $false
+    $w.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.panel))
+    $w.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.fg))
+    $w.FontFamily = [System.Windows.Media.FontFamily]::new('Segoe UI'); $w.FontSize = 13
+    $sp = [System.Windows.Controls.StackPanel]::new(); $sp.Margin = '16'
+    $w.Content = $sp
+    $lb = [System.Windows.Controls.TextBlock]::new(); $lb.Text = $label; $lb.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.status))
+    $null = $sp.Children.Add($lb)
+    $tb = [System.Windows.Controls.TextBox]::new(); $tb.Margin = '0,10,0,0'; $tb.Padding = '8,6'
+    $tb.Text = [string]$initial
+    $tb.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.input))
+    $tb.Foreground = $w.Foreground; $tb.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.border))
+    $tb.CaretBrush = $w.Foreground
+    $null = $sp.Children.Add($tb)
+    $row = [System.Windows.Controls.StackPanel]::new(); $row.Orientation = 'Horizontal'; $row.HorizontalAlignment = 'Right'; $row.Margin = '0,14,0,0'
+    $okB = [System.Windows.Controls.Button]::new(); $okB.Content = 'OK'; $okB.Padding = '16,5'; $okB.IsDefault = $true
+    $noB = [System.Windows.Controls.Button]::new(); $noB.Content = 'Cancelar'; $noB.Padding = '12,5'; $noB.Margin = '8,0,0,0'
+    $null = $row.Children.Add($okB); $null = $row.Children.Add($noB)
+    $null = $sp.Children.Add($row)
+    $okB.Add_Click({ param($s2, $e2) $w.DialogResult = $true }.GetNewClosure())
+    $noB.Add_Click({ param($s2, $e2) $w.DialogResult = $false }.GetNewClosure())
+    $w.Add_PreviewKeyUp({ param($s2, $e2) if ($e2.Key -eq 'Escape') { $s2.DialogResult = $false; $e2.Handled = $true } }.GetNewClosure())
+    try { $w.Owner = $window } catch {}
+    $w.Add_ContentRendered({ [void]$tb.Focus(); $tb.SelectAll() }.GetNewClosure())
+    if ($w.ShowDialog()) { return ([string]$tb.Text).Trim() }
+    return $null
+}
+
+# ---------- color picker visual (v3.13): arco-iris clicavel no lugar de so' digitar hex ----------
+function Get-HsvFromHex([string]$hex) {
+    try {
+        $c = [System.Windows.Media.ColorConverter]::ConvertFromString($hex)
+        $r = $c.R / 255.0; $g = $c.G / 255.0; $b = $c.B / 255.0
+        $mx = [Math]::Max($r, [Math]::Max($g, $b)); $mn = [Math]::Min($r, [Math]::Min($g, $b))
+        if ($mx -le 0) { return @(0, 0, 0) }
+        $d = $mx - $mn
+        if ($d -eq 0) { return @(0, 0, $mx) }
+        if ($mx -eq $r) { $h = ((($g - $b) / $d) % 6) * 60 } elseif ($mx -eq $g) { $h = ((($b - $r) / $d) + 2) * 60 } else { $h = ((($r - $g) / $d) + 4) * 60 }
+        if ($h -lt 0) { $h += 360 }
+        return @($h, $d / $mx, $mx)
+    } catch { return @(0, 0, 1) }
+}
+function ConvertTo-HexColor([double]$h, [double]$s, [double]$v) {
+    $h = $h % 360; if ($h -lt 0) { $h += 360 }
+    $c = $v * $s
+    $hp = $h / 60.0
+    $x = $c * (1 - [Math]::Abs(($hp % 2) - 1))
+    $r0 = 0.0; $g0 = 0.0; $b0 = 0.0
+    if     ($hp -lt 1) { $r0 = $c; $g0 = $x }
+    elseif ($hp -lt 2) { $r0 = $x; $g0 = $c }
+    elseif ($hp -lt 3) { $g0 = $c; $b0 = $x }
+    elseif ($hp -lt 4) { $g0 = $x; $b0 = $c }
+    elseif ($hp -lt 5) { $r0 = $x; $b0 = $c }
+    else               { $r0 = $c; $b0 = $x }
+    $m = $v - $c
+    '#{0:X2}{1:X2}{2:X2}' -f [int](($r0 + $m) * 255 + 0.5), [int](($g0 + $m) * 255 + 0.5), [int](($b0 + $m) * 255 + 0.5)
+}
+function Show-ColorPicker([string]$initialHex) {
+    $st = @{ h = 0.0; s = 1.0; v = 1.0; skip = $false }
+    $hv = Get-HsvFromHex $initialHex
+    $st.h = [double]$hv[0]; $st.s = [double]$hv[1]; $st.v = [double]$hv[2]
+
+    $w = [System.Windows.Window]::new()
+    $w.Title = 'ZQuick — cor'; $w.Width = 420; $w.SizeToContent = 'Height'
+    $w.WindowStartupLocation = 'CenterOwner'; $w.ResizeMode = 'NoResize'
+    $w.ShowInTaskbar = $false
+    $w.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.panel))
+    $w.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.fg))
+    $w.FontFamily = [System.Windows.Media.FontFamily]::new('Segoe UI'); $w.FontSize = 12
+    $root = [System.Windows.Controls.StackPanel]::new(); $root.Margin = '16'
+    $w.Content = $root
+
+    # espectro: gradiente de matiz (horizontal) + overlay branco->transparente (saturacao, vertical)
+    $spec = [System.Windows.Controls.Grid]::new(); $spec.Height = 150
+    $hue = [System.Windows.Media.LinearGradientBrush]::new()
+    $hue.StartPoint = [System.Windows.Point]::new(0, 0); $hue.EndPoint = [System.Windows.Point]::new(1, 0)
+    $stops = @('#FF0000','#FFFF00','#00FF00','#00FFFF','#0000FF','#FF00FF','#FF0000')
+    for ($i = 0; $i -lt $stops.Count; $i++) {
+        $null = $hue.GradientStops.Add([System.Windows.Media.GradientStop]::new([System.Windows.Media.ColorConverter]::ConvertFromString($stops[$i]), $i / 6.0))
+    }
+    $rHue = [System.Windows.Shapes.Rectangle]::new(); $rHue.Fill = $hue
+    $white = [System.Windows.Media.LinearGradientBrush]::new()
+    $white.StartPoint = [System.Windows.Point]::new(0, 0); $white.EndPoint = [System.Windows.Point]::new(0, 1)
+    $null = $white.GradientStops.Add([System.Windows.Media.GradientStop]::new([System.Windows.Media.Color]::FromArgb(255,255,255,255), 0.0))
+    $null = $white.GradientStops.Add([System.Windows.Media.GradientStop]::new([System.Windows.Media.Color]::FromArgb(0,255,255,255), 1.0))
+    $rWhite = [System.Windows.Shapes.Rectangle]::new(); $rWhite.Fill = $white
+    $mark = [System.Windows.Shapes.Ellipse]::new(); $mark.Width = 14; $mark.Height = 14
+    $mark.Stroke = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Colors]::White); $mark.StrokeThickness = 2
+    $mark.Fill = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Colors]::Transparent)
+    $mark.HorizontalAlignment = 'Left'; $mark.VerticalAlignment = 'Top'; $mark.IsHitTestVisible = $false
+    $null = $spec.Children.Add($rHue); $null = $spec.Children.Add($rWhite); $null = $spec.Children.Add($mark)
+    $null = $root.Children.Add($spec)
+
+    # brilho + preview + hex
+    $rowV = [System.Windows.Controls.StackPanel]::new(); $rowV.Orientation = 'Horizontal'; $rowV.Margin = '0,12,0,0'
+    $lblV = [System.Windows.Controls.TextBlock]::new(); $lblV.Text = 'brilho'; $lblV.Width = 46; $lblV.VerticalAlignment = 'Center'
+    $lblV.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.status))
+    $sl = [System.Windows.Controls.Slider]::new(); $sl.Minimum = 5; $sl.Maximum = 100; $sl.Width = 180
+    $sl.Value = [Math]::Round($st.v * 100); $sl.VerticalAlignment = 'Center'
+    $prev = [System.Windows.Controls.Border]::new(); $prev.Width = 42; $prev.Height = 22; $prev.Margin = '14,0,0,0'
+    $prev.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.border)); $prev.BorderThickness = '1'
+    $hexTb = [System.Windows.Controls.TextBox]::new(); $hexTb.Width = 88; $hexTb.Margin = '14,0,0,0'; $hexTb.VerticalAlignment = 'Center'
+    $hexTb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
+    $hexTb.Text = ([string]$initialHex).Trim()
+    $hexTb.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($T.input))
+    $hexTb.Foreground = $w.Foreground; $hexTb.CaretBrush = $w.Foreground
+    $null = $rowV.Children.Add($lblV); $null = $rowV.Children.Add($sl); $null = $rowV.Children.Add($prev); $null = $rowV.Children.Add($hexTb)
+    $null = $root.Children.Add($rowV)
+
+    $rowB = [System.Windows.Controls.StackPanel]::new(); $rowB.Orientation = 'Horizontal'; $rowB.HorizontalAlignment = 'Right'; $rowB.Margin = '0,14,0,0'
+    $okB = [System.Windows.Controls.Button]::new(); $okB.Content = 'OK'; $okB.Padding = '16,5'; $okB.IsDefault = $true
+    $noB = [System.Windows.Controls.Button]::new(); $noB.Content = 'Cancelar'; $noB.Padding = '12,5'; $noB.Margin = '8,0,0,0'
+    $null = $rowB.Children.Add($okB); $null = $rowB.Children.Add($noB)
+    $null = $root.Children.Add($rowB)
+
+    # atualizacao centralizada (hex, preview, marcador, slider) com guarda anti-loop
+    $upd = {
+        if ($st.skip) { return }
+        $hex = ConvertTo-HexColor $st.h $st.s $st.v
+        $st.skip = $true
+        $hexTb.Text = $hex
+        $sl.Value = [Math]::Round($st.v * 100)
+        $st.skip = $false
+        $prev.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($hex))
+        $x = ($st.h / 360.0) * [Math]::Max(1.0, $spec.ActualWidth)
+        $y = $st.s * [Math]::Max(1.0, $spec.ActualHeight)
+        $mark.Margin = [System.Windows.Thickness]::new([Math]::Max(0, $x - 7), [Math]::Max(0, $y - 7), 0, 0)
+    }.GetNewClosure()
+    $pick = {
+        param($s2, $e2)
+        $p = $e2.GetPosition($s2)
+        $st.h = [Math]::Min(359.9, [Math]::Max(0.0, ($p.X / [Math]::Max(1.0, $s2.ActualWidth)) * 360))
+        $st.s = [Math]::Min(1.0, [Math]::Max(0.0, $p.Y / [Math]::Max(1.0, $s2.ActualHeight)))
+        & $upd
+    }.GetNewClosure()
+    $spec.Add_MouseLeftButtonDown({ param($s2, $e2) $null = $s2.CaptureMouse(); & $pick $s2 $e2; $e2.Handled = $true }.GetNewClosure())
+    $spec.Add_MouseMove({ param($s2, $e2) if ($s2.IsMouseCaptured) { & $pick $s2 $e2 } }.GetNewClosure())
+    $spec.Add_MouseLeftButtonUp({ param($s2, $e2) $s2.ReleaseMouseCapture() }.GetNewClosure())
+    $sl.Add_ValueChanged({ param($s2, $e2) if (-not $st.skip) { $st.v = $s2.Value / 100.0; & $upd } }.GetNewClosure())
+    $hexTb.Add_TextChanged({ param($s2, $e2)
+        if ($st.skip) { return }
+        $t = ([string]$s2.Text).Trim()
+        if ($t -match '^#[0-9A-Fa-f]{6}$') {
+            $hv2 = Get-HsvFromHex $t
+            $st.h = [double]$hv2[0]; $st.s = [double]$hv2[1]; $st.v = [double]$hv2[2]
+            $st.skip = $true
+            $sl.Value = [Math]::Round($st.v * 100)
+            $st.skip = $false
+            $prev.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($t.ToUpper()))
+            $x = ($st.h / 360.0) * [Math]::Max(1.0, $spec.ActualWidth)
+            $y = $st.s * [Math]::Max(1.0, $spec.ActualHeight)
+            $mark.Margin = [System.Windows.Thickness]::new([Math]::Max(0, $x - 7), [Math]::Max(0, $y - 7), 0, 0)
+        }
+    }.GetNewClosure())
+    $okB.Add_Click({ param($s2, $e2) $w.DialogResult = $true }.GetNewClosure())
+    $noB.Add_Click({ param($s2, $e2) $w.DialogResult = $false }.GetNewClosure())
+    $w.Add_PreviewKeyUp({ param($s2, $e2) if ($e2.Key -eq 'Escape') { $s2.DialogResult = $false; $e2.Handled = $true } }.GetNewClosure())
+    $w.Add_ContentRendered({ & $upd }.GetNewClosure())
+    try { $w.Owner = $window } catch {}
+    if ($w.ShowDialog()) {
+        $t = ([string]$hexTb.Text).Trim()
+        if ($t -match '^#[0-9A-Fa-f]{6}$') { return $t.ToUpper() }
+        return ConvertTo-HexColor $st.h $st.s $st.v
+    }
+    return $null
+}
+
 function Show-History {
     try {
         New-Item -ItemType Directory -Force $histDir | Out-Null
@@ -3539,6 +3776,8 @@ function Show-History {
     <Border DockPanel.Dock="Bottom" Padding="10,8">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
         <TextBlock x:Name="CountText" Foreground="#6E6E7A" FontSize="11" VerticalAlignment="Center" Margin="0,0,12,0"/>
+        <Button x:Name="RenBtn" Content="✏" Margin="0,0,8,0" ToolTip="Renomear a conversa selecionada"/>
+        <Button x:Name="FavBtn" Content="⭐" Margin="0,0,8,0" ToolTip="Favoritar/desfavoritar — favoritas ficam fixas no topo"/>
         <Button x:Name="DelBtn" Content="Apagar" Margin="0,0,8,0" ToolTip="Apaga a conversa selecionada"/>
         <Button x:Name="OkBtn" Content="Retomar" Padding="14,6" FontWeight="SemiBold" IsDefault="True"/>
       </StackPanel>
@@ -3560,18 +3799,21 @@ function Show-History {
         foreach ($f in $files) {
             try {
                 $j = Get-Content -Path $f.FullName -Raw | ConvertFrom-Json
-                $entries += [pscustomobject]@{ file = $f.FullName; time = [string]$j.time; q = [string]$j.q; a = [string]$j.a }
+                $entries += [pscustomobject]@{ file = $f.FullName; time = [string]$j.time; q = [string]$j.q; a = [string]$j.a; fav = [bool]$j.fav; title = [string]$j.title }
             } catch {}
         }
         # preenche a lista (com filtro por pergunta OU resposta); closure autocontida
         $fill = {
             $f = ([string]$hsearch.Text).Trim()
             $hlist.Items.Clear()
-            foreach ($en in $entries) {
-                if ($f -eq '' -or $en.q -like "*$f*" -or $en.a -like "*$f*") {
-                    $q = $en.q
+            # v3.13: favoritas fixas no topo; nome renomeado (title) ganha prioridade sobre a pergunta
+            foreach ($en in ($entries | Sort-Object @{e = 'fav'; Descending = $true}, @{e = 'time'; Descending = $true})) {
+                if ($f -eq '' -or $en.q -like "*$f*" -or $en.a -like "*$f*" -or $en.title -like "*$f*") {
+                    $q = [string]$en.title
+                    if (-not $q) { $q = [string]$en.q }
                     if (-not $q) { $q = '(imagem)' }
                     if ($q.Length -gt 80) { $q = $q.Substring(0, 80) + '…' }
+                    if ($en.fav) { $q = '⭐ ' + $q }
                     $t = [System.Windows.Controls.TextBlock]::new()
                     $t.Text = "{0}  {1}" -f ([datetime]$en.time).ToString('dd/MM HH:mm'), $q
                     $t.TextWrapping = 'Wrap'
@@ -3609,6 +3851,41 @@ function Show-History {
                 elseif ($hlist.SelectedIndex -lt 0) { $hlist.SelectedIndex = 0 }
             }
         }.GetNewClosure())
+        # v3.13: favoritar/desfavoritar (fica fixa no topo) e renomear a conversa selecionada
+        $hw.FindName('FavBtn').Add_Click({
+            $sel = $hlist.SelectedItem
+            if ($sel) {
+                try {
+                    $fl = [string]$sel.Tag
+                    $j = Get-Content -Path $fl -Raw -Encoding utf8 | ConvertFrom-Json
+                    $nv = -not [bool]$j.fav
+                    $j | Add-Member -Force NoteProperty fav $nv
+                    $j | ConvertTo-Json -Depth 6 | Set-Content -Path $fl -Encoding utf8
+                    foreach ($en in $entries) { if ($en.file -eq $fl) { $en.fav = $nv } }
+                    & $fill
+                    Log ("historico: fav {0} -> {1}" -f (Split-Path $fl -Leaf), $nv)
+                } catch { Log "hist-fav: $_" }
+            }
+        }.GetNewClosure())
+        $hw.FindName('RenBtn').Add_Click({
+            $sel = $hlist.SelectedItem
+            if ($sel) {
+                try {
+                    $fl = [string]$sel.Tag
+                    $j = Get-Content -Path $fl -Raw -Encoding utf8 | ConvertFrom-Json
+                    $cur = [string]$j.title
+                    if (-not $cur) { $cur = [string]$j.q }
+                    $nt = Show-InputPrompt 'Renomear conversa' 'Novo nome:' $cur
+                    if ($null -ne $nt -and $nt -ne '') {
+                        $j | Add-Member -Force NoteProperty title $nt
+                        $j | ConvertTo-Json -Depth 6 | Set-Content -Path $fl -Encoding utf8
+                        foreach ($en in $entries) { if ($en.file -eq $fl) { $en.title = $nt } }
+                        & $fill
+                        Log ("historico: renomeada {0} -> '{1}'" -f (Split-Path $fl -Leaf), $nt)
+                    }
+                } catch { Log "hist-ren: $_" }
+            }
+        }.GetNewClosure())
         $hw.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') { $s.DialogResult = $false; $e.Handled = $true } })
         $null = $hw.ShowDialog()
         # apos fechar o dialogo o foco voltaria pro botao 🕘 (foi ele que abriu) —
@@ -3625,7 +3902,7 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; Update-LiveAnswer }
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|pass:') { Log ('tool: ' + $m.Text) } }
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|🧹|pass:') { Log ('tool: ' + $m.Text) } }
             'sources' { Show-Sources $m.Text }
             'plan' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
@@ -3656,8 +3933,18 @@ $timer.Add_Tick({
                             $null = $ConfirmDiff.Children.Add($tb)
                         }
                     } else { $ConfirmDiffScroll.Visibility = 'Collapsed' }
-                    # "✔ Sempre" so' faz sentido p/ acao com regra gravavel (tool+subject)
-                    if ($c.tool) { $ConfirmAlwaysBtn.Visibility = 'Visible' } else { $ConfirmAlwaysBtn.Visibility = 'Collapsed' }
+                    # "✔ Sempre" so' faz sentido p/ acao com regra gravavel (tool+subject);
+                    # compactacao (v3.13) vira "🧹 Auto-compactar" (compacta + liga autocompact)
+                    $script:confirmAuto = [bool]$c.auto
+                    if ($c.auto) {
+                        $ConfirmAlwaysBtn.Visibility = 'Visible'
+                        $ConfirmAlwaysBtn.Content = '🧹 Auto-compactar'
+                        $ConfirmAlwaysBtn.ToolTip = 'compactar automaticamente daqui pra frente, sem perguntar'
+                    } else {
+                        $ConfirmAlwaysBtn.Content = '✔ Sempre'
+                        $ConfirmAlwaysBtn.ToolTip = 'aprovar e sempre permitir esta ação (grava regra no zquick.json)'
+                        if ($c.tool) { $ConfirmAlwaysBtn.Visibility = 'Visible' } else { $ConfirmAlwaysBtn.Visibility = 'Collapsed' }
+                    }
                     $ConfirmBar.Visibility = 'Visible'
                     Log ('confirma: ' + $c.title)
                   } catch { Log ("confirm-ui ERRO: " + $_.Exception.Message + " @ " + $_.ScriptStackTrace) }
@@ -3813,8 +4100,16 @@ $ConfirmNo.Add_Click({
     $ConfirmBar.Visibility = 'Collapsed'; $StatusText.Text = 'ação negada'
 })
 $ConfirmAlwaysBtn.Add_Click({
-    if ($script:engine) { $script:engine.ConfirmAlways([int]$script:confirmId) }
-    $ConfirmBar.Visibility = 'Collapsed'; $StatusText.Text = 'sempre permitido — gravado no zquick.json'
+    if ($script:confirmAuto) {
+        # v3.13: "🧹 Auto-compactar" — aprova a compactacao E liga autocompact permanente
+        if ($script:engine) { $script:engine.ConfirmAuto([int]$script:confirmId) }
+        $cfg.autoCompact = $true; Save-Config
+        $StatusText.Text = '🧹 autocompact LIGADO — gravado no zquick.json'
+    } else {
+        if ($script:engine) { $script:engine.ConfirmAlways([int]$script:confirmId) }
+        $StatusText.Text = 'sempre permitido — gravado no zquick.json'
+    }
+    $ConfirmBar.Visibility = 'Collapsed'
 })
 
 # ---------- modo plano (#13): aprovacao em lote (uma vez, acoes seguintes sem confirm) ----------
