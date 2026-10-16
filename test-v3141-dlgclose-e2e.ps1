@@ -89,11 +89,12 @@ $sw = Open-Settings
 $hexEdits = @(Get-HexEdits $sw)
 if ($hexEdits.Count -lt 1) { throw 'nenhum TextBox hex na aba' }
 $r = $hexEdits[0].Current.BoundingRectangle
-# swatch = 16px logico antes do label de 64px antes da caixa de 90px:
+# swatch: fileira = swatch(16) + label(120) + ⟲(4+24) -> centro do swatch fica
+# 156px logicos ANTES da caixa (v3.16 acrescentou o botao ⟲; era 72 no v3.14.1)
 # escala fisica = largura real / 90
 $sf = $r.Width / 90.0
 $hexEdits[0].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
-Click-At ([int]($r.Left - 72 * $sf)) ([int](($r.Top + $r.Bottom) / 2))
+Click-At ([int]($r.Left - 156 * $sf)) ([int](($r.Top + $r.Bottom) / 2))
 Start-Sleep -Milliseconds 900
 $pk = Find-Wins | Where-Object { $_.Current.Name -like '*cor*' } | Select-Object -First 1
 if ($pk) {
@@ -119,7 +120,7 @@ $sw = Open-Settings
 $hexEdits = @(Get-HexEdits $sw)
 $r = $hexEdits[0].Current.BoundingRectangle
 $hexEdits[0].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('#GG')
-Click-At ([int]($r.Left - 72 * ($r.Width / 90.0))) ([int](($r.Top + $r.Bottom) / 2))
+Click-At ([int]($r.Left - 156 * ($r.Width / 90.0))) ([int](($r.Top + $r.Bottom) / 2))
 Start-Sleep -Milliseconds 900
 $pk = Find-Wins | Where-Object { $_.Current.Name -like '*cor*' } | Select-Object -First 1
 if ($pk) {

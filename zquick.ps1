@@ -51,6 +51,7 @@ $cfg = @{
     answerFont    = $null      # null = Cascadia Mono (padrão)
     answerFontSize = 13
     theme         = $null
+    themes        = $null      # v3.16: { "nome": { 14 cores } } — temas salvos no ⚙
     allow         = @{ runPs = @(); paths = @() }   # "sempre permitir": comandos exatos + pastas liberadas
     mcpServers    = $null      # Onda 4: { "nome": { "command": "...", "args": [...], "env": {...} } } — servidores MCP stdio
     profiles      = @{
@@ -77,6 +78,7 @@ function Reload-Config {
             $cfg.window = $w2
         }
         if ($j.theme) { $cfg.theme = $j.theme }
+        if ($j.themes) { $cfg.themes = $j.themes }   # v3.16: temas nomeados no ⚙
         if ($j.profiles) { $cfg.profiles = $j.profiles }
         if ($j.allow) {
             $a = @{ runPs = @(); paths = @() }
@@ -136,7 +138,7 @@ function Save-Config {
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
             passthrough = $cfg.passthrough
             window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
-            theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
+            theme = $cfg.theme; themes = $cfg.themes; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
         [pscustomobject]$out | ConvertTo-Json -Depth 6 | Set-Content -Path $cfgPath -Encoding utf8
     } catch { Log "save-config: $_" }
@@ -3345,6 +3347,14 @@ function Show-Settings {
               <TextBlock Text="Cores (hex #RRGGBB — efeito completo ao reabrir; principais superfícies aplicam na hora)" Foreground="#9A9AA5" FontSize="11" Margin="0,6,0,6"/>
               <UniformGrid x:Name="SetColors" Columns="2"/>
               <Button x:Name="SetResetColors" Content="restaurar cores padrão" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+              <TextBlock Text="Temas salvos" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,4"/>
+              <StackPanel Orientation="Horizontal">
+                <TextBox x:Name="SetThemeName" Width="120" ToolTip="nome do tema" FontSize="12"/>
+                <Button x:Name="SetThemeSave" Content="💾 salvar" Margin="6,0,0,0" ToolTip="guarda as 14 cores atuais das caixas com este nome"/>
+                <ComboBox x:Name="SetThemeList" Width="140" Margin="12,0,0,0" ToolTip="temas guardados no zquick.json"/>
+                <Button x:Name="SetThemeLoad" Content="◀ aplicar" Margin="6,0,0,0" ToolTip="carrega o tema escolhido nas caixas de hex (✔ Aplicar grava)"/>
+                <Button x:Name="SetThemeDel" Content="🗑" Margin="6,0,0,0" ToolTip="apagar o tema escolhido da lista"/>
+              </StackPanel>
             </StackPanel>
           </ScrollViewer>
         </Border>
@@ -3372,7 +3382,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
@@ -3429,6 +3439,22 @@ function Show-Settings {
             accent = 'Destaque/enviar'; accent2 = 'Destaque 2';     code = 'Código'
             trayA = 'Bandeja (início)'; trayB = 'Bandeja (fim)'
         }
+        $colorDesc = @{
+            bg      = 'fundo geral da janela principal'
+            card    = 'fundo dos balões de pergunta e resposta'
+            panel   = 'fundo de diálogos e barras (config, histórico, confirmações)'
+            input   = 'fundo da caixa de digitação'
+            border  = 'bordas, divisores e molduras'
+            fg      = 'texto principal (respostas e caixa)'
+            dim     = 'texto apagado: notas, modelo, dicas'
+            status  = 'texto do rodapé / barra de status'
+            q       = 'cor da pergunta ecoada na conversa'
+            accent  = 'botão enviar, seleções e links'
+            accent2 = 'tom secundário do destaque (hover)'
+            code    = 'trechos de código no meio do texto'
+            trayA   = 'início do gradiente do ícone da bandeja'
+            trayB   = 'fim do gradiente do ícone da bandeja'
+        }
         $boxes = @{}
         foreach ($k in $colorKeys) {
             $row = [System.Windows.Controls.StackPanel]::new(); $row.Orientation = 'Horizontal'; $row.Margin = '0,0,8,6'
@@ -3438,7 +3464,7 @@ function Show-Settings {
             try { $swRect.Fill = $T[$k] } catch {}
             $lbl = [System.Windows.Controls.TextBlock]::new()
             $lbl.Text = $colorNames[$k]; $lbl.Width = 120; $lbl.Foreground = $T.status; $lbl.FontSize = (FSz 11)
-            $lbl.ToolTip = "chave no json/LEIA-ME: $k"
+            $lbl.ToolTip = $colorDesc[$k]
             $lbl.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
             $lbl.VerticalAlignment = 'Center'
             $bx = [System.Windows.Controls.TextBox]::new()
@@ -3460,7 +3486,16 @@ function Show-Settings {
                 } catch { Log ('picker erro: ' + $_) }
                 $e2.Handled = $true
             }.GetNewClosure())
-            $null = $row.Children.Add($swRect); $null = $row.Children.Add($lbl); $null = $row.Children.Add($bx)
+            # v3.16: ⟲ volta SO esta cor pro padrao (Tag carrega caixa + valor default)
+            $rst = [System.Windows.Controls.Button]::new()
+            $rst.Content = '⟲'; $rst.Width = 24; $rst.MinWidth = 24; $rst.Padding = '0,0'
+            $rst.FontSize = (FSz 11); $rst.Margin = '4,0,0,0'; $rst.VerticalAlignment = 'Center'
+            $rst.ToolTip = 'voltar esta cor para o padrão'
+            $rst.Tag = @{ box = $bx; def = $themeDefaults[$k] }
+            $rst.Add_Click({ param($s2, $e2)
+                try { $s2.Tag.box.Text = $s2.Tag.def } catch { Log ('reset cor: ' + $_) }
+            })
+            $null = $row.Children.Add($swRect); $null = $row.Children.Add($lbl); $null = $row.Children.Add($rst); $null = $row.Children.Add($bx)
             $null = $g['SetColors'].Children.Add($row)
             $boxes[$k] = $bx
         }
@@ -3556,6 +3591,61 @@ function Show-Settings {
 
         $g['SetResetColors'].Add_Click({
             foreach ($k in $script:setColorKeys) { $script:setBoxes[$k].Text = $themeDefaults[$k] }
+        })
+
+        # ---- v3.16: temas salvos (nome -> 14 cores, no zquick.json) ----
+        $script:setFillThemes = {
+            $tn = @()
+            try { if ($cfg.themes) { $tn = @($cfg.themes.PSObject.Properties.Name | Sort-Object) } } catch {}
+            $script:setG['SetThemeList'].ItemsSource = $tn
+            return $tn
+        }
+        & $script:setFillThemes
+        $g['SetThemeSave'].Add_Click({
+            try {
+                $nm = ([string]$script:setG['SetThemeName'].Text).Trim()
+                if (-not $nm) { $script:setG['SetStatus'].Text = '✕ dê um nome ao tema'; return }
+                $hexes = [ordered]@{}
+                foreach ($k in $script:setColorKeys) {
+                    $hx = ([string]$script:setBoxes[$k].Text).Trim()
+                    if ($hx -notmatch '^#[0-9A-Fa-f]{6}$') { $script:setG['SetStatus'].Text = "✕ cor $k inválida ($hx)"; return }
+                    $hexes[$k] = $hx
+                }
+                if (-not $cfg.themes) { $cfg.themes = [pscustomobject]@{} }
+                Set-CfgProp $cfg.themes $nm ([pscustomobject]$hexes)
+                Save-Config
+                $null = & $script:setFillThemes
+                $script:setG['SetThemeList'].SelectedItem = $nm
+                $script:setG['SetThemeName'].Text = ''
+                $script:setG['SetStatus'].Text = "✓ tema salvo: $nm (◀ aplicar quando quiser)"
+                Log ('tema: salvo "' + $nm + '"')
+            } catch { Log ('tema salvar erro: ' + $_); $script:setG['SetStatus'].Text = '✕ salvar tema: ' + $_ }
+        })
+        $g['SetThemeLoad'].Add_Click({
+            try {
+                $nm = [string]$script:setG['SetThemeList'].SelectedItem
+                if (-not $nm) { $nm = ([string]$script:setG['SetThemeList'].Text).Trim() }
+                $th = $null; try { if ($cfg.themes) { $th = $cfg.themes.$nm } } catch {}
+                if (-not $th) { $script:setG['SetStatus'].Text = '✕ escolha um tema na lista'; return }
+                foreach ($k in $script:setColorKeys) {
+                    $hx = [string](Get-CfgProp $th $k)
+                    if ($hx -match '^#[0-9A-Fa-f]{6}$') { $script:setBoxes[$k].Text = $hx }
+                }
+                $script:setG['SetStatus'].Text = "✓ tema `"$nm`" nas caixas — ✔ Aplicar grava"
+                Log ('tema: carregado "' + $nm + '"')
+            } catch { Log ('tema carregar erro: ' + $_); $script:setG['SetStatus'].Text = '✕ aplicar tema: ' + $_ }
+        })
+        $g['SetThemeDel'].Add_Click({
+            try {
+                $nm = [string]$script:setG['SetThemeList'].SelectedItem
+                if (-not $nm) { $nm = ([string]$script:setG['SetThemeList'].Text).Trim() }
+                if (-not $nm -or -not $cfg.themes) { $script:setG['SetStatus'].Text = '✕ escolha um tema para apagar'; return }
+                try { $cfg.themes.PSObject.Properties.Remove($nm) } catch {}
+                Save-Config
+                $null = & $script:setFillThemes
+                $script:setG['SetStatus'].Text = "✓ tema apagado: $nm"
+                Log ('tema: apagado "' + $nm + '"')
+            } catch { Log ('tema apagar erro: ' + $_); $script:setG['SetStatus'].Text = '✕ apagar tema: ' + $_ }
         })
 
         # ---- preview de opacidade ao vivo ----

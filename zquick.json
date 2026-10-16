@@ -1,72 +1,75 @@
-{
-  "profile": "zai",
-  "model": "glm-5.3",
-  "hotkey": "alt+q",
-  "maxTokens": 4096,
-  "maxRounds": 16,
-  "autoCompact": false,
-  "searchEngine": "zai-server",
-  "promptCache": true,
-  "hideOnBlur": false,
-  "systemPrompt": null,
-  "windowOpacity": 0.8500000000000001,
-  "alwaysOnTop": true,
-  "passthrough": false,
-  "window": {
-    "width": 655,
-    "height": 369,
-    "x": 448,
-    "y": -760,
-    "center": true
-  },
-  "answerFont": "Cascadia Mono, Consolas",
-  "answerFontSize": 14,
-  "theme": {
-    "bg": "#0C0C0C",
-    "card": "#16161A",
-    "panel": "#1E1E24",
-    "input": "#080808",
-    "border": "#2E2E38",
-    "fg": "#E4E4E4",
-    "dim": "#767676",
-    "status": "#B2B2B2",
-    "q": "#9CC7FF",
-    "accent": "#3B78FF",
-    "accent2": "#6EA8FF",
-    "code": "#8CD9FF",
-    "trayA": "#3B78FF",
-    "trayB": "#1F4FC4"
-  },
-  "profiles": {
-    "zai": {
-      "label": "Z.ai GLM",
-      "baseUrl": null,
-      "apiKey": null,
-      "fastModel": "glm-5.3-flash",
-      "bigModel": "glm-5.3",
-      "visionModel": "glm-5.3-flash",
-      "models": [
-        "auto",
-        "glm-5.3-flash",
-        "glm-5.3"
-      ]
-    }
-  },
-  "allow": {
-    "paths": [],
-    "runPs": [
-      "$u=$env:USERPROFILE; $hits = Get-ChildItem -Path $u -Recurse -Directory -Filter *zquick* -ErrorAction SilentlyContinue | Select-Object -First 20 -ExpandProperty FullName; $hits",
-      "Get-ChildItem C:\\Users\\EVTU-DELL\\.local\\bin\\zquick -ErrorAction SilentlyContinue | Select-Object FullName,Length | Format-Table -AutoSize",
-      "Get-ChildItem C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\kit,C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\tools | Select-Object FullName,Length | Format-Table -AutoSize; Set-Location C:\\Users\\EVTU-DELL\\.local\\bin\\zquick; git log --oneline -10 2>$null",
-      "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; \"total linhas: $($lines.Count)\"; $i=0; foreach($l in $lines){ $i++; if($l -match 'ConfirmNeeded|ShouldConfirm|NeedsConfirm|IsWriteTool|ToolNeedsConfirm|confNeeded|_confTool'){ \"{0}: {1}\" -f $i, $l.Trim() } }",
-      "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=340; $i -le 560; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
-      "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=462; $i -le 560; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
-      "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; $i=0; foreach($l in $lines){ $i++; if($l -match 'SetAllowRules|New-Engine|NewEngine|engine = |New-Object.*Engine|\\[Engine\\]::new'){ \"{0}: {1}\" -f $i, $l.Trim() } }",
-      "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2140; $i -le 2230; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
-      "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2000; $i -le 2070; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
-      "$k='C:\\Users\\EVTU-DELL\\OneDrive\\Desktop\\Kit-ZQuick'; if(Test-Path $k){ Select-String -Path \"$k\\*.ps1\",\"$k\\*.txt\" -Pattern 'passthrough' -SimpleMatch -ErrorAction SilentlyContinue | Select-Object -First 5 Filename,LineNumber; Get-ChildItem $k -Recurse -Include *.ps1 | Select-Object FullName,LastWriteTime }",
-      "$f='C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1'; $L=Get-Content $f; $i=0; foreach($l in $L){$i++; if($i -ge 465 -and $i -le 560){ '{0,5}| {1}' -f $i,$l }}"
-    ]
-  },
-  "mcpServers": null
+﻿{
+    "profile":  "zai",
+    "model":  "glm-5.3",
+    "hotkey":  "alt+q",
+    "maxTokens":  4096,
+    "maxRounds":  16,
+    "autoCompact":  true,
+    "searchEngine":  "zai-server",
+    "promptCache":  true,
+    "hideOnBlur":  false,
+    "systemPrompt":  null,
+    "windowOpacity":  0.8500000000000002,
+    "alwaysOnTop":  true,
+    "passthrough":  false,
+    "window":  {
+                   "width":  1024,
+                   "height":  576,
+                   "x":  264,
+                   "y":  -864,
+                   "center":  true
+               },
+    "answerFont":  "Cascadia Mono, Consolas",
+    "answerFontSize":  14,
+    "theme":  {
+                  "bg":  "#0E0E0E",
+                  "card":  "#26262B",
+                  "panel":  "#2A2A30",
+                  "input":  "#16161A",
+                  "border":  "#3A3A44",
+                  "fg":  "#63FF33",
+                  "dim":  "#6E6E7A",
+                  "status":  "#9A9AA5",
+                  "q":  "#C9C2FF",
+                  "accent":  "#A5FF72",
+                  "accent2":  "#8B7CF6",
+                  "code":  "#A9DCFC",
+                  "trayA":  "#8B7CF6",
+                  "trayB":  "#6358C8"
+              },
+    "themes":  null,
+    "profiles":  {
+                     "zai":  {
+                                 "label":  "Z.ai GLM",
+                                 "baseUrl":  null,
+                                 "apiKey":  null,
+                                 "fastModel":  "glm-5.3-flash",
+                                 "bigModel":  "glm-5.3",
+                                 "visionModel":  "glm-5.3-flash",
+                                 "models":  [
+                                                "auto",
+                                                "glm-5.3-flash",
+                                                "glm-5.3"
+                                            ]
+                             }
+                 },
+    "allow":  {
+                  "paths":  [
+
+                            ],
+                  "runPs":  [
+                                "$u=$env:USERPROFILE; $hits = Get-ChildItem -Path $u -Recurse -Directory -Filter *zquick* -ErrorAction SilentlyContinue | Select-Object -First 20 -ExpandProperty FullName; $hits",
+                                "Get-ChildItem C:\\Users\\EVTU-DELL\\.local\\bin\\zquick -ErrorAction SilentlyContinue | Select-Object FullName,Length | Format-Table -AutoSize",
+                                "Get-ChildItem C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\kit,C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\tools | Select-Object FullName,Length | Format-Table -AutoSize; Set-Location C:\\Users\\EVTU-DELL\\.local\\bin\\zquick; git log --oneline -10 2\u003e$null",
+                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; \"total linhas: $($lines.Count)\"; $i=0; foreach($l in $lines){ $i++; if($l -match \u0027ConfirmNeeded|ShouldConfirm|NeedsConfirm|IsWriteTool|ToolNeedsConfirm|confNeeded|_confTool\u0027){ \"{0}: {1}\" -f $i, $l.Trim() } }",
+                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=340; $i -le 560; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
+                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=462; $i -le 560; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
+                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; $i=0; foreach($l in $lines){ $i++; if($l -match \u0027SetAllowRules|New-Engine|NewEngine|engine = |New-Object.*Engine|\\[Engine\\]::new\u0027){ \"{0}: {1}\" -f $i, $l.Trim() } }",
+                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2140; $i -le 2230; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
+                                "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2000; $i -le 2070; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
+                                "$k=\u0027C:\\Users\\EVTU-DELL\\OneDrive\\Desktop\\Kit-ZQuick\u0027; if(Test-Path $k){ Select-String -Path \"$k\\*.ps1\",\"$k\\*.txt\" -Pattern \u0027passthrough\u0027 -SimpleMatch -ErrorAction SilentlyContinue | Select-Object -First 5 Filename,LineNumber; Get-ChildItem $k -Recurse -Include *.ps1 | Select-Object FullName,LastWriteTime }",
+                                "$f=\u0027C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1\u0027; $L=Get-Content $f; $i=0; foreach($l in $L){$i++; if($i -ge 465 -and $i -le 560){ \u0027{0,5}| {1}\u0027 -f $i,$l }}"
+                            ]
+              },
+    "mcpServers":  null
 }

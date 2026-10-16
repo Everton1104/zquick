@@ -239,6 +239,13 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
   json, reinicie o app (Sair na bandeja → abrir de novo) para aplicar;
   pelo ⚙ o fundo/textos mudam na hora e o resto vale ao reabrir.
 
+  TEMAS SALVOS (v3.16, só pelo ⚙): digite um nome e clique em
+  "💾 salvar" para guardar as 14 cores atuais; "◀ aplicar" carrega o
+  tema escolhido de volta nas caixas (✔ Aplicar grava de fato) e "🗑"
+  apaga. Ficam na seção "themes" do json, um objeto por tema com as
+  mesmas 14 chaves do "theme". O botãozinho ⟲ do lado de cada hex
+  devolve só aquela cor para o padrão.
+
 DESINSTALAR
   Dê dois cliques em DESINSTALAR.cmd (na pasta do kit). Ele encerra o
   app, remove o atalho da Inicialização (e a tarefa ZQuick, se

@@ -82,24 +82,21 @@ foreach ($probe in @('*glm-5.3*ctx*', '*fontes*', '*nota secundaria*')) {
 if ($prevOk -lt 2) { throw 'previa incompleta (esperava status/fontes/nota)' }
 
 # 3. editar hex ao vivo (pinta a previa - visual) + reset + fechar = vivo
+# (independe do tema atual do usuario: edita a 1a caixa e confere no valor)
 $ec = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
 $hexEdits = @($sw.FindAll([System.Windows.Automation.TreeScope]::Descendants, $ec)) | Where-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -match '^#[0-9A-Fa-f]{6}$' }
 if ($hexEdits.Count -lt 14) { throw "esperava 14 hex, achei $($hexEdits.Count)" }
-$accentEd = @($hexEdits | Where-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -eq '#3B78FF' })[0]
-if (-not $accentEd) { throw 'caixa do accent nao achada' }
-$accentEd.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('#FF0000')
+$v0 = $hexEdits[0].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+$hexEdits[0].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('#FF0000')
 Start-Sleep -Milliseconds 500
 $hexEdits2 = @($sw.FindAll([System.Windows.Automation.TreeScope]::Descendants, $ec)) | Where-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -match '^#[0-9A-Fa-f]{6}$' }
-if (@($hexEdits2 | Where-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -eq '#FF0000' }).Count -lt 1) { throw 'hex do accent nao mudou' }
-'accent editado para #FF0000 (previa deve ter repintado o botao enviar)'
-$null = Invoke-ById $sw 'SetResetColors'
-Start-Sleep -Milliseconds 600
-$hexEdits3 = @($sw.FindAll([System.Windows.Automation.TreeScope]::Descendants, $ec)) | Where-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -match '^#[0-9A-Fa-f]{6}$' }
-if (@($hexEdits3 | Where-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -eq '#FF0000' }).Count -ne 0) { throw 'reset nao restaurou' }
-'reset restaurou as cores'
+if (@($hexEdits2 | Where-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -eq '#FF0000' }).Count -lt 1) { throw 'hex da 1a cor nao mudou' }
+"1a cor editada pra #FF0000 (era $v0; previa deve ter repintado)"
+# devolve o valor original antes de fechar (nao suja o tema do usuario)
+$hexEdits[0].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($v0)
 $null = Invoke-ById $sw 'SetClose'
 Start-Sleep -Milliseconds 500
 if (-not (Get-Process zquick -ErrorAction SilentlyContinue)) { throw 'processo morreu' }
 if ((Read-New $mark0) -match 'FATAL') { throw 'FATAL no log' }
 'app vivo, sem FATAL'
-"VERDICTO: OK (labels legiveis + previa presente + edicao/reset/fechar sem crash)"
+"VERDICTO: OK (labels legiveis + previa presente + edicao/fechar sem crash)"
