@@ -11,10 +11,10 @@
     "windowOpacity":  0.8500000000000001,
     "alwaysOnTop":  true,
     "window":  {
-                   "width":  1280,
-                   "height":  720,
-                   "x":  85,
-                   "y":  -896,
+                   "width":  1024,
+                   "height":  576,
+                   "x":  -86,
+                   "y":  -806,
                    "center":  true
                },
     "answerFont":  "Cascadia Mono, Consolas",
@@ -64,7 +64,8 @@
                                 "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; $i=0; foreach($l in $lines){ $i++; if($l -match \u0027SetAllowRules|New-Engine|NewEngine|engine = |New-Object.*Engine|\\[Engine\\]::new\u0027){ \"{0}: {1}\" -f $i, $l.Trim() } }",
                                 "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2140; $i -le 2230; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
                                 "$c = Get-Content C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1 -Raw; $lines = $c -split \"`n\"; for($i=2000; $i -le 2070; $i++){ \"{0}: {1}\" -f ($i+1), $lines[$i] }",
-                                "$k=\u0027C:\\Users\\EVTU-DELL\\OneDrive\\Desktop\\Kit-ZQuick\u0027; if(Test-Path $k){ Select-String -Path \"$k\\*.ps1\",\"$k\\*.txt\" -Pattern \u0027passthrough\u0027 -SimpleMatch -ErrorAction SilentlyContinue | Select-Object -First 5 Filename,LineNumber; Get-ChildItem $k -Recurse -Include *.ps1 | Select-Object FullName,LastWriteTime }"
+                                "$k=\u0027C:\\Users\\EVTU-DELL\\OneDrive\\Desktop\\Kit-ZQuick\u0027; if(Test-Path $k){ Select-String -Path \"$k\\*.ps1\",\"$k\\*.txt\" -Pattern \u0027passthrough\u0027 -SimpleMatch -ErrorAction SilentlyContinue | Select-Object -First 5 Filename,LineNumber; Get-ChildItem $k -Recurse -Include *.ps1 | Select-Object FullName,LastWriteTime }",
+                                "$f=\u0027C:\\Users\\EVTU-DELL\\.local\\bin\\zquick\\zquick.ps1\u0027; $L=Get-Content $f; $i=0; foreach($l in $L){$i++; if($i -ge 465 -and $i -le 560){ \u0027{0,5}| {1}\u0027 -f $i,$l }}"
                             ]
               },
     "mcpServers":  null

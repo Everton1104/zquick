@@ -43,6 +43,7 @@ $cfg = @{
     systemPrompt  = $null
     windowOpacity = 1.0
     alwaysOnTop   = $false    # v3.9: 📌 janela sobre as outras
+    passthrough   = $false    # pula GateConfirm (confirmacoes de ferramenta) - NA MÃO, nunca via LLM
     maxRounds     = 16         # v3.11: teto de rodadas de API por turno (2-40; ao estourar, rodada de fechamento sem tools)
     # Onda 6: janela memorizada (tamanho/posição) + fonte da área de resposta
     window        = @{ width = 860; height = 600; x = $null; y = $null; center = $true }
@@ -66,7 +67,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','answerFont','answerFontSize','mcpServers')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.window) {
@@ -131,6 +132,7 @@ function Save-Config {
             maxRounds = $cfg.maxRounds
             searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
+            passthrough = $cfg.passthrough
             window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
             theme = $cfg.theme; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
@@ -371,6 +373,7 @@ public class Engine {
     int _planId; readonly ManualResetEventSlim _planEv = new ManualResetEventSlim(false); bool _planAnswer; bool _planOk;
     readonly int _maxTokens; readonly string _search;
     int _maxRounds = 16;   // v3.11: rodadas por turno (SetMaxRounds/config maxRounds)
+    volatile bool _passThrough;   // modo passthrough: GateConfirm aprova tudo (nao confundir com allow/auto)
     int _mtNeed = 0;       // v3.11.1: maxTokens que a conversa precisou (thinking comendo o limite — memorizado no turno seguinte)
     bool _srvSearch;   // busca server-side Z.ai (server tool no /v1/messages — sonda 13/10)
     bool _cacheCtl;    // cache_control no system + ultima tool (provado por sonda: 1550->14 input tokens)
@@ -442,6 +445,7 @@ public class Engine {
 
     // v3.11: teto de rodadas por turno configuravel (default 16; 2-40 aceito)
     public void SetMaxRounds(int n) { lock (_sync) { if (n >= 2 && n <= 40) _maxRounds = n; } }
+    public void SetPassthrough(bool on) { _passThrough = on; }   // liga/desliga em runtime (botao da toolbar)
 
     public void Reset() {
         lock (_sync) { _history.Clear(); _compactAsked = false; _planOk = false; _mtNeed = 0; try { _cts.Cancel(); } catch {} }
@@ -567,6 +571,7 @@ public class Engine {
     }
 
     bool GateConfirm(string tool, string subject, string title, string detail, string diffJson, CancellationToken ct) {
+        if (_passThrough) { Emit("status", "pass: aprovado sem confirmar - " + Trunc(subject ?? title, 60)); return true; }   // v3.12: modo passthrough (liga/desliga NO BOTAO, nunca via LLM)
         if (_planOk) { Emit("status", "✅ plano: " + Trunc(subject ?? title, 60)); return true; }   // aprovado em lote
         if (ShouldAutoApprove(tool, subject)) { Emit("status", "✅ sempre permitido: " + Trunc(subject, 60)); return true; }
         int id;
@@ -2149,6 +2154,7 @@ function New-EngineFromProfile {
         [int]$cfg.maxTokens, [string]$cfg.searchEngine, $queue, [bool]$cfg.promptCache)
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
     if ($cfg.maxRounds) { $eng.SetMaxRounds([int]$cfg.maxRounds) }   # v3.11: teto de rodadas por turno (default 16)
+    if ($cfg.passthrough) { $eng.SetPassthrough($true) }   # v3.12: passthrough memorizado no json volta ligado
     $eng.MemPath = $memFile
     # Onda 5: skills .md ao lado do app — lista {name,file} entregue ao engine
     # (skill_read so' entra nas tools quando existir pelo menos uma)
@@ -2273,6 +2279,7 @@ $xamlStr = @'
           <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="TopBtn" Content="📌" Margin="8,0,0,0" ToolTip="sempre no topo — manter a janela sobre as outras" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          <Button x:Name="PassBtn" Content="🡒" Margin="8,0,0,0" ToolTip="passthrough — aprovar ações (edits/comandos) sem confirmar; clica AQUI para ligar/desligar" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="SettingsBtn" Content="⚙" Margin="14,0,0,0" ToolTip="Configurações — chaves, janela, aparência, geral" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MinBtn" Content="—" ToolTip="ocultar na bandeja (Alt+Q traz de volta)" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MaxBtn" Content="▢" ToolTip="maximizar / restaurar" Style="{StaticResource ChromeBtn}"/>
@@ -2373,6 +2380,21 @@ function Set-TopBtnVisual([bool]$on) {
 }
 if ($cfg.alwaysOnTop) { $window.Topmost = $true; Set-TopBtnVisual $true }
 $TopBtn.Add_Click({ Set-Topmost (-not $window.Topmost) })
+# v3.12: 🡒 passthrough — GateConfirm aprova tudo enquanto ligado (só o botão alterna; persiste no json)
+function Set-PassBtnVisual([bool]$on) {
+    $PassBtn.Background = $(if ($on) { $T.accent } else { $T.panel })
+    $PassBtn.ToolTip = $(if ($on) { 'passthrough: ATIVO — ações rodam SEM confirmação; clique para desligar' } else { 'passthrough — aprovar ações (edits/comandos) sem confirmar; clique para ligar' })
+}
+function Set-Passthrough([bool]$on) {
+    if ($script:engine) { try { $script:engine.SetPassthrough($on) } catch { Log "passthrough: $_" } }
+    $cfg.passthrough = $on
+    Set-PassBtnVisual $on
+    Save-Config
+    $StatusText.Text = $(if ($on) { '🡒 passthrough: ações sem confirmação' } else { '🡒 passthrough: desligado' })
+    Log ("chrome: passthrough {0}" -f $on)
+}
+if ($cfg.passthrough) { Set-PassBtnVisual $true }
+$PassBtn.Add_Click({ Set-Passthrough (-not [bool]$cfg.passthrough) })
 function Set-Topmost([bool]$on) {
     $window.Topmost = $on
     $cfg.alwaysOnTop = $on
