@@ -2876,11 +2876,29 @@ function Save-History {
     } catch { Log "save-history: $_" }
 }
 
+# fragmento de historia tem que ser JSON fechado — o bug de compactacao de 16/10 gravava o par
+# [RESUMO]/summary sem o terminador "]}". Ao ler do disco: repara o deficit, senao descarta (o
+# render do Load-Conversation e o corpo do request dependem de fragmentos validos).
+function Repair-MsgFragments($msgs) {
+    $out = @(); $fixed = 0; $dropped = 0
+    foreach ($m in $msgs) {
+        $s = [string]$m
+        $ok = $true
+        try { $null = $s | ConvertFrom-Json } catch { $ok = $false }
+        if ($ok) { $out += $s; continue }
+        try { $null = ($s + ']}') | ConvertFrom-Json; $out += ($s + ']}'); $fixed++ }
+        catch { $dropped++ }
+    }
+    if ($fixed -or $dropped) { Log ("load-history: {0} fragmento(s) reparado(s), {1} descartado(s)" -f $fixed, $dropped) }
+    ,$out
+}
+
 function Load-Conversation([string]$file) {
     try {
         if ($script:busy) { $StatusText.Text = 'aguarde a resposta atual…'; return }
         $j = Get-Content -Path $file -Raw -Encoding utf8 | ConvertFrom-Json
-        $msgs = @($j.msgs)
+        $r = Repair-MsgFragments @($j.msgs)   # sem @() em volta: a funcao ja devolve o array com ,@()
+        $msgs = @($r)
         if ($msgs.Count -lt 1) { return }
         if ($script:engine) {
             $script:engine.Reset()
