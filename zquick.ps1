@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.19'   # v3.19: versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.20'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -56,6 +56,9 @@ $cfg = @{
     ctxLimits     = $null      # v3.17: { "id-do-modelo": tokens } — override do limite de contexto
     allow         = @{ runPs = @(); paths = @() }   # "sempre permitir": comandos exatos + pastas liberadas
     mcpServers    = $null      # Onda 4: { "nome": { "command": "...", "args": [...], "env": {...} } } — servidores MCP stdio
+    checkUpdates   = $true     # v3.20: procura atualização no GitHub 1x/dia (balão se houver nova)
+    lastUpdateCheck = $null    # v3.20: última consulta (throttle de 20h entre checagens automáticas)
+    updateUrl      = $null     # v3.20: override do feed de releases (teste/espelho privado)
     profiles      = @{
         zai = @{
             label    = 'Z.ai GLM'
@@ -71,7 +74,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','autoCompact','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers','ctxLimits')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','autoCompact','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers','ctxLimits','checkUpdates','lastUpdateCheck','updateUrl')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.window) {
@@ -169,6 +172,7 @@ function Save-Config {
             searchEngine = $cfg.searchEngine; promptCache = $cfg.promptCache; hideOnBlur = $cfg.hideOnBlur
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
             passthrough = $cfg.passthrough
+            checkUpdates = [bool]$cfg.checkUpdates; lastUpdateCheck = $cfg.lastUpdateCheck; updateUrl = $cfg.updateUrl
             window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
             theme = $cfg.theme; themes = $cfg.themes; ctxLimits = $cfg.ctxLimits; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
@@ -2229,6 +2233,12 @@ function Get-ActiveProfile {
 # v3.10: a lista de modelos pode carregar "⭐" de recomendado no fim (só exibição) —
 # o id limpo (sem estrela) é o que vai pra API
 function Clean-ModelId([string]$m) { ([string]$m).Trim() -replace '\s*⭐\s*$','' }
+# leitura tolerante de propriedade (hashtable do app OU PSCustomObject do json) —
+# fica AQUI porque o boot adiantado (engine inicial, linha ~2305) já usa via Get-ActiveCtxModel
+function Get-CfgProp($obj, [string]$name) {
+    if ($obj -is [System.Collections.IDictionary]) { return $obj[$name] }
+    return $obj.$name
+}
 # v3.17: limite de contexto por modelo (tokens) — tabela + override exato no json (secao ctxLimits)
 function Get-CtxLimit([string]$model) {
     $m = Clean-ModelId $model
@@ -2714,14 +2724,17 @@ $script:winSaveTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:winSaveTimer.Interval = [TimeSpan]::FromMilliseconds(1200)
 $script:winSaveTimer.Add_Tick({ $script:winSaveTimer.Stop(); Save-WindowPos })
 $script:centering = $false
+$script:winReady = $false   # v3.20: layout inicial do Show também dispara LocationChanged — não é o usuário
 $window.Add_SizeChanged({ if (-not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() } })
 $window.Add_LocationChanged({
     # v3.19: mover a janela = o usuário escolheu posição — "centralizar" desliga sozinho
-    if (-not $script:centering -and $cfg.window.center) {
+    # (v3.20: só conta depois do 1º ContentRendered — o posicionamento inicial do
+    #  WPF no Show() disparava isto e matava o "centralizar" de uma instalação nova)
+    if (-not $script:centering -and $script:winReady -and $cfg.window.center) {
         $cfg.window.center = $false
         Log 'janela: movida pelo usuário — passa a abrir na última posição/tamanho'
     }
-    if (-not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() }
+    if ($script:winReady -and -not $script:winSaveTimer.IsEnabled) { $script:winSaveTimer.Start() }
 })
 
 # ---------- estado ----------
@@ -3387,10 +3400,6 @@ function Set-CfgProp($obj, [string]$name, $value) {
     elseif ($obj.PSObject.Properties[$name]) { $obj.$name = $value }
     else { Add-Member -InputObject $obj -MemberType NoteProperty -Name $name -Value $value -Force }
 }
-function Get-CfgProp($obj, [string]$name) {
-    if ($obj -is [System.Collections.IDictionary]) { return $obj[$name] }
-    return $obj.$name
-}
 function Show-Settings {
     try {
         $sxStr = @'
@@ -3667,6 +3676,13 @@ function Show-Settings {
               <CheckBox x:Name="SetHideBlur" Content="fechar a janela ao perder o foco" Foreground="#E8E8EC" Margin="0,10,0,0"/>
               <TextBlock Text="systemPrompt (personalidade; vazio = padrão)" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,4"/>
               <TextBox x:Name="SetSys" AcceptsReturn="True" TextWrapping="Wrap" Height="110" VerticalScrollBarVisibility="Auto"/>
+              <TextBlock Text="Atualizações (releases do GitHub)" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,4"/>
+              <StackPanel Orientation="Horizontal">
+                <CheckBox x:Name="SetAutoUpd" Content="procurar automaticamente 1x por dia" Foreground="#E8E8EC" VerticalAlignment="Center"/>
+                <Button x:Name="SetUpdCheck" Content="🔎 procurar agora" Margin="10,0,0,0" Padding="10,3" FontSize="11"
+                        Background="#3B78FF" Foreground="#C0FFEE" BorderThickness="0" Cursor="Hand"/>
+              </StackPanel>
+              <TextBlock x:Name="SetUpdStatus" Text="" Foreground="#9A9AA5" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
             </StackPanel>
           </ScrollViewer>
         </Border>
@@ -3678,7 +3694,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetWiz','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetWiz','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetAutoUpd','SetUpdCheck','SetUpdStatus','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
@@ -3702,6 +3718,7 @@ function Show-Settings {
         $g['SetMaxTok'].Text = [string][int]$cfg.maxTokens
         $g['SetCache'].IsChecked = [bool]$cfg.promptCache
         $g['SetHideBlur'].IsChecked = [bool]$cfg.hideOnBlur
+        $g['SetAutoUpd'].IsChecked = [bool]$cfg.checkUpdates
         $g['SetSys'].Text = "$(if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else { '' })"
 
         # estado do dialogo em escopo de SCRIPT + handlers como scriptblocks simples:
@@ -3997,6 +4014,14 @@ function Show-Settings {
 
         # v3.19: assistente de configuração — conexão, benchmark dos modelos, recomendação, autostart, atalho
         $g['SetWiz'].Add_Click({ try { Show-SetupWizard $true } catch { Log "wizard(config): $_" } })
+        # v3.20: procura manual de atualização (o resultado vem no SetUpdStatus/na janela)
+        $g['SetUpdCheck'].Add_Click({
+            try {
+                $script:setG['SetUpdStatus'].Text = '🔎 consultando…'
+                [void]$script:setSW.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+                Invoke-UpdateCheck 'cfg'
+            } catch { Log "updcheck: $_"; try { $script:setG['SetUpdStatus'].Text = '✕ ' + $_.Exception.Message } catch {} }
+        })
 
         $g['SetApply'].Add_Click({
             try {
@@ -4052,6 +4077,7 @@ function Show-Settings {
                 else { $bad += 'maxTokens (512-32768)' }
                 $cfg.promptCache = [bool]$script:setG['SetCache'].IsChecked
                 $cfg.hideOnBlur  = [bool]$script:setG['SetHideBlur'].IsChecked
+                $cfg.checkUpdates = [bool]$script:setG['SetAutoUpd'].IsChecked
                 $sp = $script:setG['SetSys'].Text.Trim()
                 $cfg.systemPrompt = $(if ($sp) { $sp } else { $null })
 
@@ -5118,6 +5144,13 @@ $miShow = [System.Windows.Forms.ToolStripMenuItem]::new('Mostrar')
 $miShow.Add_Click({ Toggle-Window })
 $miWiz = [System.Windows.Forms.ToolStripMenuItem]::new('Assistente de configuração')
 $miWiz.Add_Click({ try { Show-SetupWizard $true } catch { Log "wizard(bandeja): $_" } })
+$miUpd = [System.Windows.Forms.ToolStripMenuItem]::new('Procurar atualizações')
+$miUpd.Add_Click({
+    try {
+        if ($script:updPending) { Show-UpdateWindow $script:updPending; return }
+        Invoke-UpdateCheck 'tray'
+    } catch { Log "update(bandeja): $_" }
+})
 $miExit = [System.Windows.Forms.ToolStripMenuItem]::new('Sair')
 $miExit.Add_Click({
     $script:exiting = $true
@@ -5126,12 +5159,16 @@ $miExit.Add_Click({
     [System.Windows.Application]::Current.Shutdown()
 })
 $menu.Items.AddRange([System.Windows.Forms.ToolStripItem[]]@(
-    $miShow, [System.Windows.Forms.ToolStripSeparator]::new(), $miWiz, [System.Windows.Forms.ToolStripSeparator]::new(), $miExit))
+    $miShow, [System.Windows.Forms.ToolStripSeparator]::new(), $miWiz, $miUpd, [System.Windows.Forms.ToolStripSeparator]::new(), $miExit))
 
 $notify = [System.Windows.Forms.NotifyIcon]::new()
 $notify.Icon = $icon; $notify.Text = 'ZQuick'
 $notify.ContextMenuStrip = $menu; $notify.Visible = $true
 $notify.Add_DoubleClick({ Toggle-Window })
+# v3.20: clique no balão de "atualização disponível" abre o diálogo de download
+$notify.Add_BalloonTipClicked({
+    if ($script:updPending) { try { Show-UpdateWindow $script:updPending } catch { Log "upd-win: $_" } }
+})
 
 # ---------- v3.19: assistente de configuracao (wizard) ----------
 # 4 etapas: conexao (URL + chave + teste) -> benchmark dos modelos (tempo de resposta
@@ -5164,6 +5201,196 @@ function Set-ZQAutostart([bool]$on) {
         }
         return $true
     } catch { Log ('wizard: autostart: ' + $_.Exception.Message); return $false }
+}
+
+# ---------- v3.20: atualização automática (releases do GitHub) ----------
+# Consulta releases/latest do repo e compara com $appVer; havendo versão nova,
+# baixa o asset zquick.exe do release, troca o exe (o atual vira .old) e reinicia.
+# cfg: checkUpdates (auto 1x/dia no boot), lastUpdateCheck (throttle de 20h),
+#      updateUrl (override do feed — teste/espelho privado).
+$updApi = 'https://api.github.com/repos/Everton1104/zquick/releases/latest'
+$script:updPending = $null
+
+function Get-UpdExePath {
+    # exe em uso; em modo dev (powershell -File zquick.ps1) usa o exe construído ao lado
+    $exe = $null
+    try { $exe = (Get-Process -Id $PID).Path } catch {}
+    if ($exe -and $exe -match '\.exe$') { return $exe }
+    return (Join-Path $appDir 'zquick.exe')
+}
+
+function Get-UpdVer([string]$s) {
+    # normaliza p/ 3 componentes ('3.20' == '3.20.0' — [version] puro diria que 3.20 < 3.20.0)
+    $s = $s.Trim().TrimStart('vV')
+    if ($s -notmatch '\.') { $s = $s + '.0' }
+    if (@($s -split '\.').Count -lt 3) { $s = $s + '.0' }
+    try { return [version]$s } catch { return $null }
+}
+
+function Check-Update {
+    # $null = consulta falhou (já logou) | @{ newer=[bool]; ver=[version]; url; size; notes; note }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $uri = if ($cfg.updateUrl) { [string]$cfg.updateUrl } else { $updApi }
+        $r = Invoke-RestMethod -Method Get -Uri $uri -Headers @{ 'User-Agent' = 'ZQuick' } -TimeoutSec 20
+        $tag = [string]$r.tag_name
+        if (-not $tag) { Log 'update: release sem tag — ignora'; return $null }
+        $nv = Get-UpdVer $tag
+        if (-not $nv) { Log ('update: tag não reconhecida: ' + $tag); return $null }
+        $cv = Get-UpdVer $appVer
+        if ($nv -le $cv) { return @{ newer = $false; ver = $nv } }
+        $asset = @($r.assets | Where-Object { $_.name -eq 'zquick.exe' })[0]
+        if (-not $asset) {
+            $msg = 'release ' + $nv + ' sem zquick.exe anexado — atualize pelo MSI ou pela página do release'
+            Log ('update: ' + $msg)
+            return @{ newer = $false; ver = $nv; note = $msg }
+        }
+        @{ newer = $true; ver = $nv; url = [string]$asset.browser_download_url; size = [long]$asset.size; notes = [string]$r.body }
+    } catch { Log ('update: consulta falhou: ' + $_.Exception.Message); return $null }
+}
+
+function Show-UpdStatus([string]$m) {
+    # label do ⚙→Geral (só faz algo com o diálogo aberto)
+    try { if ($script:setSW -and $script:setSW.IsLoaded) { $script:setG['SetUpdStatus'].Text = $m } } catch {}
+}
+
+function Invoke-UpdateCheck([string]$mode) {   # 'auto' (boot) | 'tray' | 'cfg' (⚙→Geral)
+    if ($mode -eq 'auto') {
+        if (-not $cfg.checkUpdates) { return }
+        if ($cfg.lastUpdateCheck) {
+            try {
+                $h = ((Get-Date) - [datetime]$cfg.lastUpdateCheck).TotalHours
+                if ($h -lt 20) { Log ('update: pulou (consultou há ' + [Math]::Round($h, 1) + ' h)'); return }
+            } catch {}
+        }
+    }
+    $script:updMode = $mode
+    $null = $window.Dispatcher.BeginInvoke([Action]{
+        try {
+            if ($script:updMode -eq 'cfg') { Show-UpdStatus '🔎 consultando…' }
+            $u = Check-Update
+            if ($null -eq $u) {
+                if ($script:updMode -eq 'tray') { try { $notify.ShowBalloonTip(8000, 'ZQuick', 'não consegui consultar o GitHub — sem internet? (detalhes no log)', 'Warning') } catch {} }
+                elseif ($script:updMode -eq 'cfg') { Show-UpdStatus '✕ não consegui consultar o GitHub (detalhes em %TEMP%\zquick.log)' }
+                return
+            }
+            $cfg.lastUpdateCheck = (Get-Date).ToString('s')
+            Save-Config
+            if (-not $u.newer) {
+                Log ('update: em dia (atual ' + $appVer + ', latest ' + $u.ver + ')')
+                $script:updPending = $null
+                try { $miUpd.Text = 'Procurar atualizações' } catch {}
+                if ($script:updMode -eq 'cfg') {
+                    Show-UpdStatus ('✔ você está na versão mais recente (' + $appVer + ')' + $(if ($u.note) { ' — porém: ' + $u.note } else { '' }))
+                } elseif ($script:updMode -eq 'tray') {
+                    try { $notify.ShowBalloonTip(8000, 'ZQuick ' + $appVer, 'você está na versão mais recente', 'Info') } catch {}
+                }
+                return
+            }
+            $script:updPending = $u
+            try { $miUpd.Text = ('⬇ baixar atualização (' + $u.ver + ')') } catch {}
+            Log ('update: NOVA versão ' + $u.ver + ' disponível (atual ' + $appVer + ')')
+            Show-UpdStatus ('⬇ ZQuick ' + $u.ver + ' disponível')
+            if ($script:updMode -eq 'auto') {
+                try { $notify.ShowBalloonTip(12000, 'ZQuick ' + $u.ver + ' disponível', 'clique aqui ou use o menu da bandeja para atualizar', 'Info') } catch {}
+            } else {
+                Show-UpdateWindow $u
+            }
+        } catch { Log ('update(check): ' + $_.Exception.Message) }
+    }, [System.Windows.Threading.DispatcherPriority]::Background)
+}
+
+function Show-UpdateWindow($u) {
+    # diálogo "atualização disponível" — baixar+trocar+reiniciar, ou depois
+    try {
+        $uxStr = @"
+<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        Title='ZQuick — atualização' WindowStyle='None' AllowsTransparency='True'
+        Background='Transparent' WindowStartupLocation='CenterOwner'
+        SizeToContent='Height' Width='480' ResizeMode='NoResize' ShowInTaskbar='False'>
+  <Border Background='#202024' BorderBrush='#3A3A44' BorderThickness='1' CornerRadius='10' Padding='18' Margin='10'>
+    <StackPanel>
+      <TextBlock Text='⬇ atualização disponível' Foreground='#E8E8EC' FontSize='15' FontWeight='Bold'/>
+      <TextBlock x:Name='UpdVer' Foreground='#E8E8EC' FontSize='12' Margin='0,10,0,0' TextWrapping='Wrap'/>
+      <Border Background='#16161A' BorderBrush='#3A3A44' BorderThickness='1' CornerRadius='6'
+              Padding='10' Margin='0,10,0,0' Height='150'>
+        <ScrollViewer VerticalScrollBarVisibility='Auto'>
+          <TextBlock x:Name='UpdNotes' Foreground='#9A9AA5' FontSize='11' TextWrapping='Wrap'/>
+        </ScrollViewer>
+      </Border>
+      <StackPanel Orientation='Horizontal' HorizontalAlignment='Right' Margin='0,16,0,0'>
+        <Button x:Name='UpdNo' Content='depois' Padding='14,6' FontSize='12' Cursor='Hand'/>
+        <Button x:Name='UpdGo' Content='⬇ atualizar e reiniciar' Padding='14,6' Margin='8,0,0,0' FontSize='12'
+                Background='#3B78FF' Foreground='#C0FFEE' BorderThickness='0' Cursor='Hand'/>
+      </StackPanel>
+    </StackPanel>
+  </Border>
+</Window>
+"@
+        [xml]$ux = Theme-Xaml $uxStr
+        $uw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($ux))
+        if ($script:setSW -and $script:setSW.IsLoaded) { $uw.Owner = $script:setSW }
+        elseif ($window.IsLoaded) { $uw.Owner = $window }
+        else { $uw.WindowStartupLocation = 'CenterScreen' }
+        $uw.FindName('UpdVer').Text = ('ZQuick ' + $u.ver + ' disponível — você está na ' + $appVer + '.')
+        $nt = [string]$u.notes
+        if ($nt) {
+            $nt = $nt -replace '\[([^\]]+)\]\([^)]+\)', '$1' -replace '[#>*`]', ''
+            if ($nt.Length -gt 700) { $nt = $nt.Substring(0, 700) + '…' }
+        }
+        $uw.FindName('UpdNotes').Text = $(if ($nt) { $nt } else { '(sem notas de versão)' })
+        $script:updWin = $uw
+        $uw.Add_MouseLeftButtonDown({ try { $script:updWin.DragMove() } catch {} })
+        $uw.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { try { $script:updWin.Close() } catch {} } })
+        $uw.FindName('UpdNo').Add_Click({ try { $script:updWin.Close() } catch {} })
+        $uw.FindName('UpdGo').Add_Click({
+            try {
+                $b = $script:updWin.FindName('UpdGo')
+                $b.Content = '⬇ baixando…'; $b.IsEnabled = $false
+                [void]$script:updWin.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+                $ok = Update-ZQ $script:updPending
+                if (-not $ok) {
+                    $b.Content = '⬇ atualizar e reiniciar'; $b.IsEnabled = $true
+                    $script:updWin.FindName('UpdVer').Text = 'aguarde a resposta atual terminar (ou ⏹ Parar) e tente de novo'
+                }
+            } catch {
+                Log ('update(instala): ' + $_.Exception.Message)
+                try {
+                    $b = $script:updWin.FindName('UpdGo'); $b.Content = '⬇ atualizar e reiniciar'; $b.IsEnabled = $true
+                    $script:updWin.FindName('UpdVer').Text = '✕ ' + $_.Exception.Message
+                } catch {}
+            }
+        })
+        [void]$uw.ShowDialog()
+    } catch { Log ('update(janela): ' + $_.Exception.Message) }
+}
+
+function Update-ZQ($u) {
+    # baixa o zquick.exe do release, troca (o atual vira .old) e reinicia o app.
+    # $false = adiado (resposta em andamento); sucesso não retorna (Exit).
+    if ($script:busy) { Log 'update: resposta em andamento — atualização adiada'; return $false }
+    $exe = Get-UpdExePath
+    if (-not (Test-Path -LiteralPath $exe)) { throw ('não achei o executável: ' + $exe) }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $tmp = Join-Path $env:TEMP ('zquick-' + $u.ver + '.exe')
+    Log ('update: baixando ' + $u.url)
+    Invoke-WebRequest -Uri $u.url -OutFile $tmp -Headers @{ 'User-Agent' = 'ZQuick' } -TimeoutSec 180 -UseBasicParsing
+    $sz = (Get-Item -LiteralPath $tmp).Length
+    if ($sz -lt 200000) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw ('download suspeito: ' + $sz + ' bytes') }
+    if ($u.size -gt 0 -and $sz -ne $u.size) { throw ('tamanho difere do release: ' + $sz + ' vs ' + $u.size) }
+    $old = $exe + '.old'
+    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
+    Move-Item -LiteralPath $exe -Destination $old -Force            # exe em uso pode ser renomeado
+    try { Move-Item -LiteralPath $tmp -Destination $exe -Force }
+    catch { Move-Item -LiteralPath $old -Destination $exe -Force; throw }
+    Log ('update: ' + $appVer + ' -> ' + $u.ver + ' instalado — reiniciando')
+    $script:exiting = $true
+    try { if ($script:engine) { $script:engine.ShutdownMcp() } } catch {}   # mata servidores MCP filhos
+    try { $notify.Visible = $false; $notify.Dispose() } catch {}
+    try { $mtx.ReleaseMutex() } catch {}                            # libera o single-instance p/ a nova cópia
+    Start-Process -FilePath $exe
+    [Environment]::Exit(0)
 }
 
 # auth das caixas do wizard: URL da caixa; chave da caixa ou a atual do perfil/ambiente
@@ -5631,6 +5858,20 @@ $timer.Start()
 $app = [System.Windows.Application]::new()
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
 
+# v3.20: atualização automática — limpa a sobra da atualização anterior (.old) e
+# agenda a consulta ao GitHub p/ 20s depois de abrir (máx. 1x/20h; cfg.checkUpdates)
+try {
+    $updOld = (Get-UpdExePath) + '.old'
+    if (Test-Path -LiteralPath $updOld) { Remove-Item -LiteralPath $updOld -Force; Log 'update: removeu zquick.exe.old (sobra da atualização anterior)' }
+} catch {}
+$updTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$updTimer.Interval = [timespan]::FromSeconds(20)
+$updTimer.Add_Tick({
+    try { $updTimer.Stop() } catch {}
+    try { Invoke-UpdateCheck 'auto' } catch { Log ('update(auto): ' + $_.Exception.Message) }
+})
+$updTimer.Start()
+
 # v3.19: 1a execucao sem chave nenhuma -> assistente de configuracao abre sozinho
 # (assim que a janela pinta; instalador nao precisa mais abrir o json no Bloco de Notas)
 $window.Add_ContentRendered({
@@ -5639,6 +5880,8 @@ $window.Add_ContentRendered({
     Log 'assistente: sem chave configurada — abrindo na 1ª execução'
     try { Show-SetupWizard $false } catch { Log "wizard(1ª vez): $_" }
 })
+# v3.20: a partir daqui move/resize = usuário (ver handler de LocationChanged)
+$window.Add_ContentRendered({ $script:winReady = $true })
 
 if ($Hidden) {
     $window.Opacity = 0

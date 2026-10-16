@@ -12,11 +12,14 @@
     "windowOpacity":  0.8500000000000002,
     "alwaysOnTop":  true,
     "passthrough":  false,
+    "checkUpdates":  true,
+    "lastUpdateCheck":  "2026-10-16T16:28:45",
+    "updateUrl":  null,
     "window":  {
-                   "width":  982,
-                   "height":  569,
-                   "x":  479,
-                   "y":  -1004,
+                   "width":  786,
+                   "height":  455,
+                   "x":  577,
+                   "y":  -948,
                    "center":  false
                },
     "answerFont":  "Cascadia Mono, Consolas",

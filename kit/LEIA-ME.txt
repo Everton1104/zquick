@@ -42,6 +42,17 @@ INSTALAÇÃO (em outro PC)
   4. Concluir salva tudo. Pronto — Alt+Q.
   Reabrir o assistente depois: botão 🧙 no ⚙ ou menu do ícone Z.
 
+ATUALIZAÇÃO AUTOMÁTICA
+  Uma vez por dia (ao abrir o app) o ZQuick consulta os releases do GitHub
+  (Everton1104/zquick). Saindo versão nova, aparece um balão — clique nele
+  (ou no menu do ícone Z → "Procurar atualizações") e confirme: ele baixa
+  o zquick.exe do release, troca o executável sozinho e REINICIA o app
+  (conversas e configurações ficam; o arquivo antigo vira zquick.exe.old
+  e é removido no boot seguinte). Para checar na hora: ⚙ → aba Geral →
+  "🔎 procurar agora". Dá para desligar a busca automática nesse mesmo
+  lugar. Instalou pelo MSI? O auto-update atualiza o exe do mesmo jeito —
+  ou, se preferir, baixe o ZQuick-x.y.z.msi novo e instale por cima.
+
 CHAVES DE OUTRAS LLMs (perfis)
   Não precisa ser Claude: o ZQuick fala a API Anthropic (/v1/messages)
   e qualquer provedor que exponha esse padrão serve — Z.ai (GLM),
@@ -114,7 +125,7 @@ USO
                 ajusta a OPACIDADE ao vivo (40–100%). A transparência
                 é real: dá para ver a Área de Trabalho por trás.
   Ícone Z na bandeja: duplo clique = mostrar; botão direito = Assistente
-  de configuração / Sair.
+  de configuração / Procurar atualizações / Sair.
 
 ANEXOS DE ARQUIVO
   Cole com Ctrl+V (ou arraste): além de prints, o app aceita
