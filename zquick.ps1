@@ -125,7 +125,8 @@ if ($cfg.theme) {
 function Theme-Xaml([string]$x) {
     foreach ($pair in @(
         @('#202024', $T.bg), @('#2A2A30', $T.panel), @('#16161A', $T.input), @('#3A3A44', $T.border),
-        @('#E8E8EC', $T.fg), @('#9A9AA5', $T.status), @('#6E6E7A', $T.dim)
+        @('#E8E8EC', $T.fg), @('#9A9AA5', $T.status), @('#6E6E7A', $T.dim),
+        @('#3B78FF', $T.accent), @('#C0FFEE', (Get-ContrastFgHex $T.accent))
     )) { $x = $x.Replace($pair[0], $pair[1]) }
     if ([Math]::Abs($script:fscale - 1.0) -gt 0.001) {
         $me = [System.Text.RegularExpressions.MatchEvaluator]{ param($m)
@@ -149,6 +150,14 @@ function Get-ContrastFg([string]$hex) {
         }
     } catch {}
     [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Colors]::White)
+}
+# v3.18: mesmo contraste, mas devolve HEX (para injetar nos literais do XAML via Theme-Xaml)
+function Get-ContrastFgHex([string]$hex) {
+    try {
+        $c = [System.Windows.Media.ColorConverter]::ConvertFromString(([string]$hex).Trim())
+        if ((0.299 * $c.R + 0.587 * $c.G + 0.114 * $c.B) -gt 140) { return '#000000' }
+    } catch {}
+    '#FFFFFF'
 }
 function Save-Config {
     try {
@@ -2376,6 +2385,93 @@ $xamlStr = @'
         </Trigger>
       </Style.Triggers>
     </Style>
+    <!-- v3.18: ComboBox com visual do tema (fechado = input; lista = panel; foco/hover = accent).
+         Template proprio porque o padrao do WPF ignora Background/Foreground e abre lista branca;
+         cobre os dois modos: normal (ContentSite) e editavel (PART_EditableTextBox, ex.: SetFont). -->
+    <Style TargetType="ComboBox">
+      <Setter Property="Background" Value="#16161A"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="3">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="20"/>
+                  </Grid.ColumnDefinitions>
+                  <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False" Margin="8,5,2,5" VerticalAlignment="Center" HorizontalAlignment="Stretch"
+                                    Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                    ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                  <TextBox x:Name="PART_EditableTextBox" Margin="6,4,2,4" VerticalAlignment="Center" Background="Transparent" BorderThickness="0"
+                           Foreground="{TemplateBinding Foreground}" CaretBrush="{TemplateBinding Foreground}" Visibility="Collapsed"
+                           IsReadOnly="{TemplateBinding IsReadOnly}"/>
+                  <ToggleButton x:Name="Toggle" Grid.Column="0" Grid.ColumnSpan="2" Focusable="False" ClickMode="Press" Cursor="Hand"
+                                IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                    <ToggleButton.Template>
+                      <ControlTemplate TargetType="ToggleButton">
+                        <Border Background="Transparent">
+                          <Path Data="M0,0 L4.5,4.5 9,0 Z" Fill="#6E6E7A" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                      </ControlTemplate>
+                    </ToggleButton.Template>
+                  </ToggleButton>
+                </Grid>
+              </Border>
+              <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Placement="Bottom"
+                     Focusable="False" PopupAnimation="Fade">
+                <Border x:Name="DropBd" Background="#2A2A30" BorderBrush="#3A3A44" BorderThickness="1" CornerRadius="3" Margin="0,2,0,0"
+                        MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                  <ScrollViewer Margin="2">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                </Border>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEditable" Value="True">
+                <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed"/>
+                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="Toggle" Property="Grid.Column" Value="1"/>
+                <Setter TargetName="Toggle" Property="Grid.ColumnSpan" Value="1"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#3B78FF"/>
+              </Trigger>
+              <Trigger Property="IsDropDownOpen" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#3B78FF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="Bd" Background="Transparent" Padding="8,5" CornerRadius="3" SnapsToDevicePixels="True">
+              <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
+                <Setter TargetName="Bd" Property="TextElement.Foreground" Value="#C0FFEE"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
   </Window.Resources>
   <DockPanel>
     <Border DockPanel.Dock="Top" Padding="14,10,14,8">
@@ -3311,6 +3407,122 @@ function Show-Settings {
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
           <Setter Property="Background" Value="#3A3A44"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <!-- v3.18: idem janela principal + campos de texto: sem estilo implicito os TextBox/PasswordBox
+         do dialogo caem no BRANCO padrao do WPF (so a janela principal declara cores locais) -->
+    <Style TargetType="ComboBox">
+      <Setter Property="Background" Value="#16161A"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="3">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="20"/>
+                  </Grid.ColumnDefinitions>
+                  <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False" Margin="8,5,2,5" VerticalAlignment="Center" HorizontalAlignment="Stretch"
+                                    Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                    ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                  <TextBox x:Name="PART_EditableTextBox" Margin="6,4,2,4" VerticalAlignment="Center" Background="Transparent" BorderThickness="0"
+                           Foreground="{TemplateBinding Foreground}" CaretBrush="{TemplateBinding Foreground}" Visibility="Collapsed"
+                           IsReadOnly="{TemplateBinding IsReadOnly}"/>
+                  <ToggleButton x:Name="Toggle" Grid.Column="0" Grid.ColumnSpan="2" Focusable="False" ClickMode="Press" Cursor="Hand"
+                                IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                    <ToggleButton.Template>
+                      <ControlTemplate TargetType="ToggleButton">
+                        <Border Background="Transparent">
+                          <Path Data="M0,0 L4.5,4.5 9,0 Z" Fill="#6E6E7A" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                      </ControlTemplate>
+                    </ToggleButton.Template>
+                  </ToggleButton>
+                </Grid>
+              </Border>
+              <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Placement="Bottom"
+                     Focusable="False" PopupAnimation="Fade">
+                <Border x:Name="DropBd" Background="#2A2A30" BorderBrush="#3A3A44" BorderThickness="1" CornerRadius="3" Margin="0,2,0,0"
+                        MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                  <ScrollViewer Margin="2">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                </Border>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEditable" Value="True">
+                <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed"/>
+                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="Toggle" Property="Grid.Column" Value="1"/>
+                <Setter TargetName="Toggle" Property="Grid.ColumnSpan" Value="1"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#3B78FF"/>
+              </Trigger>
+              <Trigger Property="IsDropDownOpen" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#3B78FF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="Bd" Background="Transparent" Padding="8,5" CornerRadius="3" SnapsToDevicePixels="True">
+              <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#3B78FF"/>
+                <Setter TargetName="Bd" Property="TextElement.Foreground" Value="#C0FFEE"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Background" Value="#16161A"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="CaretBrush" Value="#E8E8EC"/>
+      <Setter Property="SelectionBrush" Value="#3B78FF"/>
+      <Setter Property="Padding" Value="6,4"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Style.Triggers>
+        <Trigger Property="IsKeyboardFocusWithin" Value="True">
+          <Setter Property="BorderBrush" Value="#3B78FF"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="PasswordBox">
+      <Setter Property="Background" Value="#16161A"/>
+      <Setter Property="Foreground" Value="#E8E8EC"/>
+      <Setter Property="BorderBrush" Value="#3A3A44"/>
+      <Setter Property="CaretBrush" Value="#E8E8EC"/>
+      <Setter Property="SelectionBrush" Value="#3B78FF"/>
+      <Setter Property="Padding" Value="6,4"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Style.Triggers>
+        <Trigger Property="IsKeyboardFocusWithin" Value="True">
+          <Setter Property="BorderBrush" Value="#3B78FF"/>
         </Trigger>
       </Style.Triggers>
     </Style>

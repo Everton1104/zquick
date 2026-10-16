@@ -15,8 +15,8 @@
     "window":  {
                    "width":  1024,
                    "height":  576,
-                   "x":  264,
-                   "y":  -864,
+                   "x":  256,
+                   "y":  120,
                    "center":  true
                },
     "answerFont":  "Cascadia Mono, Consolas",
