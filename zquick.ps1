@@ -507,7 +507,38 @@ public class Engine {
 
     // historico de conversa (snapshots brutos do _history) p/ salvar/retomar
     public List<string> GetHistory() { lock (_sync) { return new List<string>(_history); } }
-    public void SetHistory(List<string> msgs) { lock (_sync) { if (_busy == 1) return; _history.Clear(); _compactAsked = false; if (msgs != null) _history.AddRange(msgs); } }
+    // fragmento de historico tem que fechar todas as chaves/colchetes (fora de strings).
+    // O MiniJson e' leniente com truncamento, entao a validacao e' por balanceamento.
+    static bool FragOk(string s) {
+        if (string.IsNullOrEmpty(s) || s[0] != '{') return false;
+        int d1 = 0, d2 = 0; bool q = false;
+        for (int i = 0; i < s.Length; i++) {
+            char ch = s[i];
+            if (q) { if (ch == '\\') i++; else if (ch == '"') q = false; continue; }
+            if (ch == '"') q = true;
+            else if (ch == '{') d1++; else if (ch == '}') d1--;
+            else if (ch == '[') d2++; else if (ch == ']') d2--;
+        }
+        return d1 == 0 && d2 == 0;
+    }
+
+    // ao retomar do disco: fragmento truncado (ex.: bug de compactacao de 16/10, que nao fechava
+    // "content" com ]}) nao pode entrar no corpo do request — o JSON inteiro morreria com 400 na
+    // API. Repara quando o defeito e' exatamente o terminador "}]}"; caso contrario ignora e avisa.
+    public void SetHistory(List<string> msgs) {
+        int fixedN = 0, bad = 0;
+        lock (_sync) {
+            if (_busy == 1) return;
+            _history.Clear(); _compactAsked = false;
+            if (msgs != null) foreach (string m in msgs) {
+                if (m == null) { bad++; continue; }
+                if (FragOk(m)) _history.Add(m);
+                else if (FragOk(m + "]}")) { _history.Add(m + "]}"); fixedN++; }
+                else bad++;
+            }
+        }
+        if (fixedN + bad > 0) Emit("note", "histórico retomado: " + fixedN + " reparada(s), " + bad + " corrompida(s) ignorada(s)");
+    }
 
     public void Ask(string userText, List<string> imagesPngB64, string systemPrompt) { Ask(userText, imagesPngB64, null, null, systemPrompt); }
 
@@ -667,8 +698,8 @@ public class Engine {
             string summary = Summarize(oldMsgs, ct);
             if (string.IsNullOrEmpty(summary)) { Emit("note", "compactação falhou — mantendo histórico"); return; }
             var nh = new List<string>();
-            nh.Add("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":" + J("[RESUMO da conversa anterior, gerado automaticamente]") + "}");
-            nh.Add("{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":" + J(summary) + "}");
+            nh.Add("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":" + J("[RESUMO da conversa anterior, gerado automaticamente]") + "}]}");
+            nh.Add("{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":" + J(summary) + "}]}");
             nh.AddRange(recent);
             lock (_sync) { _history.Clear(); _history.AddRange(nh); }
             Emit("note", "conversa compactada: " + msgs.Count + " → " + nh.Count + " mensagens");
