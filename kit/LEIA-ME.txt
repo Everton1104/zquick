@@ -25,15 +25,22 @@ O QUE É
     ~240 KB, não instala nada).
 
 INSTALAÇÃO (em outro PC)
-  1. Copie a pasta Kit-ZQuick inteira para o PC de destino.
-  2. Dê dois cliques em INSTALAR.cmd.
-     (Se o SmartScreen reclamar: "Mais informações" → "Executar assim
-      mesmo" — exe sem assinatura digital.)
-  3. O Bloco de Notas abre o zquick.json: troque
-     COLE-AQUI-SUA-CHAVE-ZAI pela sua chave da Z.ai e salve.
-  4. A janela abre sozinha. Teste com Alt+Q.
-  Instala em %LOCALAPPDATA%\Programs\ZQuick e cria atalho na
-  Inicialização (abre oculto na bandeja a cada logon).
+  Jeito 1 — MSI (recomendado): dois cliques em ZQuick-x.y.z.msi (na pasta
+  do kit ou nos releases do GitHub). Instala por USUÁRIO — não pede
+  administrador — em %LOCALAPPDATA%\Programs\ZQuick, com atalho no Menu
+  Iniciar. (SmartScreen: "Mais informações" → "Executar assim mesmo" —
+  binário sem assinatura digital.)
+  Jeito 2 — pasta: copie a pasta Kit-ZQuick inteira e dê dois cliques
+  em INSTALAR.cmd (mesmo destino, sem atalho no Menu Iniciar).
+
+  Na primeira execução o ASSISTENTE DE CONFIGURAÇÃO abre sozinho:
+  1. Cole a chave da API (Z.ai: z.ai → API Keys) e teste a conexão;
+  2. Ele mede o tempo de resposta de CADA modelo e monta a lista
+     ordenada + a recomendação ⚡ rápido / 🧠 forte / 👁 visão;
+  3. Escolha se o ZQuick inicia com o Windows e confira o atalho
+     Alt+Q (dá para trocar e testar outra combinação ali mesmo);
+  4. Concluir salva tudo. Pronto — Alt+Q.
+  Reabrir o assistente depois: botão 🧙 no ⚙ ou menu do ícone Z.
 
 CHAVES DE OUTRAS LLMs (perfis)
   Não precisa ser Claude: o ZQuick fala a API Anthropic (/v1/messages)
@@ -106,7 +113,8 @@ USO
   Ctrl+roda .... roda do mouse COM Ctrl sobre qualquer janela do app
                 ajusta a OPACIDADE ao vivo (40–100%). A transparência
                 é real: dá para ver a Área de Trabalho por trás.
-  Ícone Z na bandeja: duplo clique = mostrar; botão direito = Sair.
+  Ícone Z na bandeja: duplo clique = mostrar; botão direito = Assistente
+  de configuração / Sair.
 
 ANEXOS DE ARQUIVO
   Cole com Ctrl+V (ou arraste): além de prints, o app aceita
@@ -264,12 +272,16 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
   nem sobrescritos — os seus ficam depois deles.
 
 DESINSTALAR
-  Dê dois cliques em DESINSTALAR.cmd (na pasta do kit). Ele encerra o
-  app, remove o atalho da Inicialização (e a tarefa ZQuick, se
-  existir) e apaga %LOCALAPPDATA%\Programs\ZQuick — antes pergunta se
-  você quer salvar suas conversas e configuração (vão para
-  Área de Trabalho\ZQuick-backup). As notas do agente ficam em
-  Documentos\ZQuick-Notas (apague à mão se quiser).
+  Instalou pelo MSI? Configurações → Aplicativos → ZQuick → Desinstalar
+  (ou msiexec /x ZQuick-x.y.z.msi). A desinstalação NÃO apaga suas
+  conversas nem a configuração (history\ e zquick.json ficam em
+  %LOCALAPPDATA%\Programs\ZQuick — apague à mão se quiser).
+  Instalou pelo INSTALAR.cmd? Dê dois cliques em DESINSTALAR.cmd (na
+  pasta do kit). Ele encerra o app, remove o atalho da Inicialização
+  (e a chave de registro/tarefa ZQuick, se existirem) e apaga
+  %LOCALAPPDATA%\Programs\ZQuick — antes pergunta se você quer salvar
+  suas conversas e configuração (vão para Área de Trabalho\ZQuick-backup).
+  As notas do agente ficam em Documentos\ZQuick-Notas (apague à mão).
 
 OBSERVAÇÕES
   • Velocidade: perguntas simples levam ~5s até começar a resposta —
