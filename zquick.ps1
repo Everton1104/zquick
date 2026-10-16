@@ -371,6 +371,7 @@ public class Engine {
     int _planId; readonly ManualResetEventSlim _planEv = new ManualResetEventSlim(false); bool _planAnswer; bool _planOk;
     readonly int _maxTokens; readonly string _search;
     int _maxRounds = 16;   // v3.11: rodadas por turno (SetMaxRounds/config maxRounds)
+    int _mtNeed = 0;       // v3.11.1: maxTokens que a conversa precisou (thinking comendo o limite — memorizado no turno seguinte)
     bool _srvSearch;   // busca server-side Z.ai (server tool no /v1/messages — sonda 13/10)
     bool _cacheCtl;    // cache_control no system + ultima tool (provado por sonda: 1550->14 input tokens)
     readonly List<string> _history = new List<string>();
@@ -443,7 +444,7 @@ public class Engine {
     public void SetMaxRounds(int n) { lock (_sync) { if (n >= 2 && n <= 40) _maxRounds = n; } }
 
     public void Reset() {
-        lock (_sync) { _history.Clear(); _compactAsked = false; _planOk = false; try { _cts.Cancel(); } catch {} }
+        lock (_sync) { _history.Clear(); _compactAsked = false; _planOk = false; _mtNeed = 0; try { _cts.Cancel(); } catch {} }
         KillShell();   // conversa nova = sessao de shell nova
     }
     public void Cancel() { lock (_sync) { try { _cts.Cancel(); } catch {} } }
@@ -885,7 +886,7 @@ public class Engine {
                 else { Emit("note", "pré-busca: não voltou a tempo (seguindo fluxo normal)"); }
             }
 
-            string stop = ""; bool sawText = false;
+            string stop = ""; bool sawText = false; int mtBumps = 0;
             // teto de rodadas por turno: 16 (era 12 — sonda 16/10: tarefa real de
             // implementacao morreu NO teto: 6 rodadas de diagnostico + plano + 5
             // pos-plano = 12; turno terminou sem texto final e o plano pela metade).
@@ -936,11 +937,34 @@ public class Engine {
                 if (pdfRetry) { round--; continue; }
                 if (ct.IsCancellationRequested) { StopCancelled(); return; }
                 List<string> bj = new List<string>();
+                var okBlocks = new List<Blk>();
+                bool roundText = false, roundTool = false;
                 foreach (Blk b in blocks) {
+                    // tool_use PARCIAL (corte max_tokens no meio do JSON): fora do
+                    // historico E da execucao — o JSON invalido derrubaria o proximo
+                    // request com 400
+                    if (b.Kind == "tool_use" && !FragOk(b.Input.Length > 0 ? b.Input.ToString() : "{}")) continue;
+                    okBlocks.Add(b);
                     string j2 = BlkJson(b); if (j2 != null) bj.Add(j2);
-                    if (b.Kind == "text" && !b.Trace && b.Text.Length > 0) sawText = true;
+                    if (b.Kind == "text" && !b.Trace && b.Text.Length > 0) { sawText = true; roundText = true; }
+                    if (b.Kind == "tool_use") roundTool = true;
                 }
-                lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"); }
+                // content vazio (so' thinking truncado) tambem nao entra: a API rejeita
+                if (bj.Count > 0) lock (_sync) { _history.Add("{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj) + "]}"); }
+                // glm-5.3: o thinking pode comer o maxTokens INTEIRO e a rodada voltar
+                // so' com raciocinio truncado + stop=max_tokens — zero texto, zero tool
+                // (caso 16/10 11:12: "pronto" com resposta VAZIA). Refaz a rodada com
+                // teto maior em vez de encerrar mudo; o teto que funcionar fica
+                // memorizado para o resto da conversa (2 bumps por turno, cap 16384).
+                if (stop == "max_tokens" && !roundText && !roundTool && mtBumps < 2 && !ct.IsCancellationRequested) {
+                    int cap = Math.Max(_maxTokens, 16384);
+                    int bump = Math.Min(mtBumps == 0 ? Math.Max(_maxTokens * 2, 8192) : cap, cap);
+                    if (bump > _maxTokens) {
+                        mtBumps++; if (bump > _mtNeed) _mtNeed = bump;
+                        Emit("status", "⚠ saída cortada pelo limite de tokens — repetindo com " + bump + "…");
+                        round--; continue;
+                    }
+                }
                 if (stop != "tool_use" || ct.IsCancellationRequested) {
                     // fim natural: cortes nunca silenciosos (glm pode voltar vazio quando
                     // o thinking come o maxTokens — a rodada "termina" sem dizer nada)
@@ -949,7 +973,7 @@ public class Engine {
                     Emit("done", ""); return;
                 }
                 // executa tools — Onda 4: leitura/busca EM PARALELO, o resto serial na ordem
-                string resJson = ExecTools(blocks, ct);
+                string resJson = ExecTools(okBlocks, ct);
                 lock (_sync) { _history.Add("{\"role\":\"user\",\"content\":[" + resJson + "]}"); }
             }
             // ----- teto de rodadas com tools pendentes: RODADA DE FECHAMENTO sem tools
@@ -1372,7 +1396,7 @@ public class Engine {
         }
         if (!withTools) tools.Clear();   // fechamento do turno: "tools":[] — so' texto sai
         b.Append("{\"model\":\"").Append(vm)
-         .Append("\",\"max_tokens\":").Append(_maxTokens)
+         .Append("\",\"max_tokens\":").Append(Math.Max(_maxTokens, _mtNeed))
          .Append(",\"stream\":true,\"system\":").Append(sysJson)
          .Append(",\"tools\":[").Append(string.Join(",", tools.ToArray()))
          .Append("],\"messages\":[");

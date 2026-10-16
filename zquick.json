@@ -11,10 +11,10 @@
     "windowOpacity":  0.8500000000000001,
     "alwaysOnTop":  true,
     "window":  {
-                   "width":  819,
-                   "height":  461,
-                   "x":  358,
-                   "y":  178,
+                   "width":  1280,
+                   "height":  720,
+                   "x":  85,
+                   "y":  -896,
                    "center":  true
                },
     "answerFont":  "Cascadia Mono, Consolas",
