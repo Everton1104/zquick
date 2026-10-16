@@ -3442,8 +3442,10 @@ function Show-Settings {
             $swRect.Cursor = [System.Windows.Input.Cursors]::Hand
             $swRect.ToolTip = 'clique para escolher a cor no seletor visual'
             $swRect.Add_MouseLeftButtonDown({ param($s2, $e2)
-                $hex2 = Show-ColorPicker ([string]$s2.Tag.Text)
-                if ($hex2) { $s2.Tag.Text = $hex2 }
+                try {
+                    $hex2 = Show-ColorPicker ([string]$s2.Tag.Text)
+                    if ($hex2) { $s2.Tag.Text = $hex2 }
+                } catch { Log ('picker erro: ' + $_) }
                 $e2.Handled = $true
             }.GetNewClosure())
             $null = $row.Children.Add($swRect); $null = $row.Children.Add($lbl); $null = $row.Children.Add($bx)
@@ -3470,7 +3472,7 @@ function Show-Settings {
 
         Log ("config: dialogo (perfis {0})" -f $profNames.Count)
 
-        $g['SetClose'].Add_Click({ $script:setSW.DialogResult = $false })
+        $g['SetClose'].Add_Click({ try { $script:setSW.DialogResult = $false } catch { try { $script:setSW.Close() } catch {} } })
         $g['SetCancel'].Add_Click({ $window.Opacity = $script:baseOpacity; $script:setSW.Opacity = $script:baseOpacity })   # desfaz preview
 
         # v3.10: puxa a lista de modelos do provedor (GET /v1/models do padrao Anthropic) e enche a caixa do topo
@@ -3595,7 +3597,7 @@ function Show-Settings {
         })
 
         $sw.Owner = $window
-        $null = $sw.ShowDialog()
+        try { $null = $sw.ShowDialog() } catch { try { $sw.Close() } catch {}; throw }
         $window.Opacity = $script:baseOpacity   # garante preview desfeito
     } catch { Log "settings: $_" }
 }
@@ -3624,12 +3626,14 @@ function Show-InputPrompt([string]$title, [string]$label, [string]$initial) {
     $noB = [System.Windows.Controls.Button]::new(); $noB.Content = 'Cancelar'; $noB.Padding = '12,5'; $noB.Margin = '8,0,0,0'
     $null = $row.Children.Add($okB); $null = $row.Children.Add($noB)
     $null = $sp.Children.Add($row)
-    $okB.Add_Click({ param($s2, $e2) $w.DialogResult = $true }.GetNewClosure())
-    $noB.Add_Click({ param($s2, $e2) $w.DialogResult = $false }.GetNewClosure())
-    $w.Add_PreviewKeyUp({ param($s2, $e2) if ($e2.Key -eq 'Escape') { $s2.DialogResult = $false; $e2.Handled = $true } }.GetNewClosure())
+    $okB.Add_Click({ param($s2, $e2) try { $w.DialogResult = $true } catch { try { $w.Close() } catch {} } }.GetNewClosure())
+    $noB.Add_Click({ param($s2, $e2) try { $w.DialogResult = $false } catch { try { $w.Close() } catch {} } }.GetNewClosure())
+    $w.Add_PreviewKeyUp({ param($s2, $e2) if ($e2.Key -eq 'Escape') { try { $s2.DialogResult = $false } catch { try { $s2.Close() } catch {} }; $e2.Handled = $true } }.GetNewClosure())
     try { $w.Owner = $window } catch {}
     $w.Add_ContentRendered({ [void]$tb.Focus(); $tb.SelectAll() }.GetNewClosure())
-    if ($w.ShowDialog()) { return ([string]$tb.Text).Trim() }
+    $dr = $false
+    try { $dr = [bool]$w.ShowDialog() } catch { try { $w.Close() } catch {} }
+    if ($dr) { return ([string]$tb.Text).Trim() }
     return $null
 }
 
@@ -3660,7 +3664,9 @@ function ConvertTo-HexColor([double]$h, [double]$s, [double]$v) {
     elseif ($hp -lt 5) { $r0 = $x; $b0 = $c }
     else               { $r0 = $c; $b0 = $x }
     $m = $v - $c
-    '#{0:X2}{1:X2}{2:X2}' -f [int](($r0 + $m) * 255 + 0.5), [int](($g0 + $m) * 255 + 0.5), [int](($b0 + $m) * 255 + 0.5)
+    # clamp 255: [int]255.5 arredonda p/ 256 (banker's) e '#100100100' e hex
+    # invalido — era o "O token nao e valido" que derrubava o seletor (v3.14.1)
+    '#{0:X2}{1:X2}{2:X2}' -f ([Math]::Min(255, [int](($r0 + $m) * 255 + 0.5))), ([Math]::Min(255, [int](($g0 + $m) * 255 + 0.5))), ([Math]::Min(255, [int](($b0 + $m) * 255 + 0.5)))
 }
 function Show-ColorPicker([string]$initialHex) {
     $st = @{ h = 0.0; s = 1.0; v = 1.0; skip = $false }
@@ -3759,12 +3765,14 @@ function Show-ColorPicker([string]$initialHex) {
             $mark.Margin = [System.Windows.Thickness]::new([Math]::Max(0, $x - 7), [Math]::Max(0, $y - 7), 0, 0)
         }
     }.GetNewClosure())
-    $okB.Add_Click({ param($s2, $e2) $w.DialogResult = $true }.GetNewClosure())
-    $noB.Add_Click({ param($s2, $e2) $w.DialogResult = $false }.GetNewClosure())
-    $w.Add_PreviewKeyUp({ param($s2, $e2) if ($e2.Key -eq 'Escape') { $s2.DialogResult = $false; $e2.Handled = $true } }.GetNewClosure())
+    $okB.Add_Click({ param($s2, $e2) try { $w.DialogResult = $true } catch { try { $w.Close() } catch {} } }.GetNewClosure())
+    $noB.Add_Click({ param($s2, $e2) try { $w.DialogResult = $false } catch { try { $w.Close() } catch {} } }.GetNewClosure())
+    $w.Add_PreviewKeyUp({ param($s2, $e2) if ($e2.Key -eq 'Escape') { try { $s2.DialogResult = $false } catch { try { $s2.Close() } catch {} }; $e2.Handled = $true } }.GetNewClosure())
     $w.Add_ContentRendered({ & $upd }.GetNewClosure())
     try { $w.Owner = $window } catch {}
-    if ($w.ShowDialog()) {
+    $dr = $false
+    try { $dr = [bool]$w.ShowDialog() } catch { try { $w.Close() } catch {}; Log ('picker erro: ' + $_) }
+    if ($dr) {
         $t = ([string]$hexTb.Text).Trim()
         if ($t -match '^#[0-9A-Fa-f]{6}$') { return $t.ToUpper() }
         return ConvertTo-HexColor $st.h $st.s $st.v
@@ -3903,21 +3911,21 @@ function Show-History {
         $hw.Add_ContentRendered({ [void]$hsearch.Focus() }.GetNewClosure())
         Log ("historico: dialogo ({0} itens)" -f $entries.Count)
 
-        $hw.FindName('HistClose').Add_Click({ param($s, $e) $hw.DialogResult = $false }.GetNewClosure())
+        $hw.FindName('HistClose').Add_Click({ param($s, $e) try { $hw.DialogResult = $false } catch { try { $hw.Close() } catch {} } }.GetNewClosure())
         $hw.FindName('OkBtn').Add_Click({ param($s, $e)
             $sel = $hlist.SelectedItem
-            if ($sel) { Load-Conversation ([string]$sel.Tag); $hw.DialogResult = $true }
+            if ($sel) { try { Load-Conversation ([string]$sel.Tag) } catch { Log ('hist load: ' + $_) }; try { $hw.DialogResult = $true } catch { try { $hw.Close() } catch {} } }
         }.GetNewClosure())
         $hlist.Add_MouseDoubleClick({ param($s, $e)
             $sel = $hlist.SelectedItem
-            if ($sel) { Load-Conversation ([string]$sel.Tag); $hw.DialogResult = $true }
+            if ($sel) { try { Load-Conversation ([string]$sel.Tag) } catch { Log ('hist load: ' + $_) }; try { $hw.DialogResult = $true } catch { try { $hw.Close() } catch {} } }
         }.GetNewClosure())
         $hw.FindName('DelBtn').Add_Click({
             $sel = $hlist.SelectedItem
             if ($sel) {
                 try { Remove-Item ([string]$sel.Tag) -Force -ErrorAction Stop } catch {}
                 $hlist.Items.Remove($sel) | Out-Null
-                if ($hlist.Items.Count -eq 0) { $hw.DialogResult = $false }
+                if ($hlist.Items.Count -eq 0) { try { $hw.DialogResult = $false } catch { try { $hw.Close() } catch {} } }
                 elseif ($hlist.SelectedIndex -lt 0) { $hlist.SelectedIndex = 0 }
             }
         }.GetNewClosure())
@@ -3956,8 +3964,8 @@ function Show-History {
                 } catch { Log "hist-ren: $_" }
             }
         }.GetNewClosure())
-        $hw.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') { $s.DialogResult = $false; $e.Handled = $true } })
-        $null = $hw.ShowDialog()
+        $hw.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') { try { $s.DialogResult = $false } catch { try { $s.Close() } catch {} }; $e.Handled = $true } })
+        try { $null = $hw.ShowDialog() } catch { try { $hw.Close() } catch {}; throw }
         # apos fechar o dialogo o foco voltaria pro botao 🕘 (foi ele que abriu) —
         # devolve pro campo de digitar pra seguir a conversa retomada
         [void]$InputBox.Focus()
