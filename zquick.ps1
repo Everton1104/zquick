@@ -3340,7 +3340,9 @@ function Show-Settings {
                   <TextBox x:Name="SetFontSize" Width="60" FontFamily="Cascadia Mono, Consolas"/>
                 </StackPanel>
               </StackPanel>
-              <TextBlock Text="Cores (hex #RRGGBB — efeito completo ao reabrir; principais superfícies aplicam na hora)" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,6"/>
+              <TextBlock Text="Prévia — mini ZQuick reflete as cores ao vivo enquanto você edita" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,4"/>
+              <Border x:Name="SetPrevHost" BorderBrush="#2E2E38" BorderThickness="1" CornerRadius="4" Margin="0,0,0,4" Padding="6"/>
+              <TextBlock Text="Cores (hex #RRGGBB — efeito completo ao reabrir; principais superfícies aplicam na hora)" Foreground="#9A9AA5" FontSize="11" Margin="0,6,0,6"/>
               <UniformGrid x:Name="SetColors" Columns="2"/>
               <Button x:Name="SetResetColors" Content="restaurar cores padrão" HorizontalAlignment="Left" Margin="0,10,0,0"/>
             </StackPanel>
@@ -3370,7 +3372,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
@@ -3419,6 +3421,14 @@ function Show-Settings {
 
         # ---- grade de cores (swatch + nome + hex) ----
         $colorKeys = @('bg','card','panel','input','border','fg','dim','status','q','accent','accent2','code','trayA','trayB')
+        # v3.15: nomes legiveis (tooltip mostra a chave usada no json/LEIA-ME)
+        $colorNames = @{
+            bg = 'Fundo da janela';    card = 'Card da resposta';   panel = 'Painéis/diálogos'
+            input = 'Caixa de texto';  border = 'Bordas';           fg = 'Texto principal'
+            dim = 'Texto secundário';  status = 'Barra de status';  q = 'Pergunta'
+            accent = 'Destaque/enviar'; accent2 = 'Destaque 2';     code = 'Código'
+            trayA = 'Bandeja (início)'; trayB = 'Bandeja (fim)'
+        }
         $boxes = @{}
         foreach ($k in $colorKeys) {
             $row = [System.Windows.Controls.StackPanel]::new(); $row.Orientation = 'Horizontal'; $row.Margin = '0,0,8,6'
@@ -3427,7 +3437,8 @@ function Show-Settings {
             $swRect.Stroke = '#3A3A44'; $swRect.StrokeThickness = 1
             try { $swRect.Fill = $T[$k] } catch {}
             $lbl = [System.Windows.Controls.TextBlock]::new()
-            $lbl.Text = $k; $lbl.Width = 64; $lbl.Foreground = $T.status; $lbl.FontSize = (FSz 11)
+            $lbl.Text = $colorNames[$k]; $lbl.Width = 120; $lbl.Foreground = $T.status; $lbl.FontSize = (FSz 11)
+            $lbl.ToolTip = "chave no json/LEIA-ME: $k"
             $lbl.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
             $lbl.VerticalAlignment = 'Center'
             $bx = [System.Windows.Controls.TextBox]::new()
@@ -3436,6 +3447,7 @@ function Show-Settings {
             $bx.Tag = $swRect
             $bx.Add_TextChanged({ param($s2, $e2)
                 try { $s2.Tag.Fill = ([System.Windows.Media.ColorConverter]::ConvertFromString($s2.Text)) -as [System.Windows.Media.SolidColorBrush] } catch {}
+                if ($script:setPrevUpd) { & $script:setPrevUpd }
             })
             # v3.13: clicar no swatch abre o seletor visual (arco-iris) — o hex escolhido volta pra caixa
             $swRect.Tag = $bx
@@ -3454,6 +3466,94 @@ function Show-Settings {
         }
         $script:setBoxes = $boxes
         $script:setColorKeys = $colorKeys
+
+        # ---- v3.15: mini ZQuick — espelho das cores ao vivo (todas as 14 chaves) ----
+        $pv = @{}
+        $mini = [System.Windows.Controls.Border]::new()
+        $mini.BorderThickness = '1'; $mini.CornerRadius = '4'; $mini.Padding = '6'
+        $mp = [System.Windows.Controls.StackPanel]::new(); $mini.Child = $mp
+        # barra de titulo fake (panel) com bandeja em gradiente + ▢ ✕
+        $tbar = [System.Windows.Controls.Border]::new(); $tbar.Padding = '6,3'; $tbar.CornerRadius = '3'
+        $tdp = [System.Windows.Controls.DockPanel]::new(); $tbar.Child = $tdp
+        $trayR = [System.Windows.Shapes.Rectangle]::new(); $trayR.Width = 14; $trayR.Height = 10
+        $trayR.ToolTip = 'ícone da bandeja (trayA → trayB)'
+        [System.Windows.Controls.DockPanel]::SetDock($trayR, 'Right')
+        $trayBr = [System.Windows.Media.LinearGradientBrush]::new()
+        $trayBr.StartPoint = [System.Windows.Point]::new(0, 0); $trayBr.EndPoint = [System.Windows.Point]::new(1, 0)
+        $null = $trayBr.GradientStops.Add([System.Windows.Media.GradientStop]::new([System.Windows.Media.Colors]::White, 0.0))
+        $null = $trayBr.GradientStops.Add([System.Windows.Media.GradientStop]::new([System.Windows.Media.Colors]::Black, 1.0))
+        $trayR.Fill = $trayBr
+        $xt = [System.Windows.Controls.TextBlock]::new(); $xt.Text = ' ▢ ✕'
+        [System.Windows.Controls.DockPanel]::SetDock($xt, 'Right'); $xt.FontSize = (FSz 9)
+        $tt = [System.Windows.Controls.TextBlock]::new(); $tt.Text = 'ZQuick — busca'
+        $null = $tdp.Children.Add($trayR); $null = $tdp.Children.Add($xt); $null = $tdp.Children.Add($tt)
+        $null = $mp.Children.Add($tbar)
+        # pergunta (q)
+        $qt = [System.Windows.Controls.TextBlock]::new(); $qt.Text = '❓ sua pergunta aparece aqui'
+        $qt.TextWrapping = 'Wrap'; $qt.Margin = '0,6,0,4'
+        $null = $mp.Children.Add($qt)
+        # card de resposta (card) com texto (fg), codigo (code) e nota (dim)
+        $cardB = [System.Windows.Controls.Border]::new(); $cardB.Padding = '6'; $cardB.CornerRadius = '3'
+        $cardP = [System.Windows.Controls.StackPanel]::new(); $cardB.Child = $cardP
+        $at = [System.Windows.Controls.TextBlock]::new(); $at.TextWrapping = 'Wrap'
+        $at.Inlines.Add('Resposta do assistente — texto com ')
+        $codeRun = [System.Windows.Documents.Run]::new('código')
+        $at.Inlines.Add($codeRun); $at.Inlines.Add(' no meio.')
+        $nt = [System.Windows.Controls.TextBlock]::new(); $nt.Text = 'nota secundária · respondido em 2s'
+        $nt.Margin = '0,2,0,0'; $nt.FontSize = (FSz 10)
+        $null = $cardP.Children.Add($at); $null = $cardP.Children.Add($nt)
+        $null = $mp.Children.Add($cardB)
+        # rodape: status + fontes (accent2)
+        $srow = [System.Windows.Controls.DockPanel]::new(); $srow.Margin = '0,4,0,0'
+        $src = [System.Windows.Controls.TextBlock]::new(); $src.Text = '🌐 [1] fontes'
+        [System.Windows.Controls.DockPanel]::SetDock($src, 'Right')
+        $stt = [System.Windows.Controls.TextBlock]::new(); $stt.Text = 'glm-5.3 • ctx 12%'
+        $null = $srow.Children.Add($src); $null = $srow.Children.Add($stt)
+        $null = $mp.Children.Add($srow)
+        # composer: caixa (input+dim) + botao enviar (accent)
+        $irow = [System.Windows.Controls.DockPanel]::new(); $irow.Margin = '0,6,0,0'
+        $sendB = [System.Windows.Controls.Button]::new(); $sendB.Content = '➤'; $sendB.Padding = '8,2'
+        [System.Windows.Controls.DockPanel]::SetDock($sendB, 'Right')
+        $inB = [System.Windows.Controls.Border]::new(); $inB.Padding = '5,3'; $inB.CornerRadius = '2'
+        $inT = [System.Windows.Controls.TextBlock]::new(); $inT.Text = 'digite aqui…'
+        $inB.Child = $inT
+        $null = $irow.Children.Add($sendB); $null = $irow.Children.Add($inB)
+        $null = $mp.Children.Add($irow)
+
+        $pv['bg'] = $mini; $pv['border'] = $mini; $pv['host'] = $g['SetPrevHost']
+        $pv['panel'] = $tbar; $pv['status'] = @($stt, $tt); $pv['dim'] = @($nt, $xt, $inT)
+        $pv['q'] = $qt; $pv['card'] = $cardB; $pv['fg'] = $at; $pv['code'] = $codeRun
+        $pv['accent'] = $sendB; $pv['accent2'] = $src; $pv['input'] = $inB; $pv['tray'] = $trayBr
+        $g['SetPrevHost'].Child = $mini
+        $script:setPrev = $pv
+        # repinta o mini a cada tecla no hex (valores parciais/invalidos sao ignorados)
+        $script:setPrevUpd = {
+            foreach ($k in $script:setColorKeys) {
+                $hx = ([string]$script:setBoxes[$k].Text).Trim()
+                if ($hx -notmatch '^#[0-9A-Fa-f]{6}$') { continue }
+                try {
+                    $b = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($hx))
+                    switch ($k) {
+                        'bg'      { $script:setPrev['bg'].Background = $b }
+                        'card'    { $script:setPrev['card'].Background = $b }
+                        'panel'   { $script:setPrev['panel'].Background = $b }
+                        'input'   { $script:setPrev['input'].Background = $b }
+                        'border'  { $script:setPrev['border'].BorderBrush = $b; $script:setPrev['host'].BorderBrush = $b }
+                        'fg'      { $script:setPrev['fg'].Foreground = $b }
+                        'dim'     { foreach ($d in $script:setPrev['dim']) { $d.Foreground = $b } }
+                        'status'  { foreach ($s3 in $script:setPrev['status']) { $s3.Foreground = $b } }
+                        'q'       { $script:setPrev['q'].Foreground = $b }
+                        'code'    { $script:setPrev['code'].Foreground = $b }
+                        'accent'  { $script:setPrev['accent'].Background = $b }
+                        'accent2' { $script:setPrev['accent2'].Foreground = $b }
+                        'trayA'   { $script:setPrev['tray'].GradientStops[0].Color = $b.Color }
+                        'trayB'   { $script:setPrev['tray'].GradientStops[1].Color = $b.Color }
+                    }
+                } catch {}
+            }
+        }
+        & $script:setPrevUpd   # pinta com as cores atuais na abertura
+
         $g['SetResetColors'].Add_Click({
             foreach ($k in $script:setColorKeys) { $script:setBoxes[$k].Text = $themeDefaults[$k] }
         })
