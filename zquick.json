@@ -31,13 +31,30 @@
                   "dim":  "#6E6E7A",
                   "status":  "#9A9AA5",
                   "q":  "#C9C2FF",
-                  "accent":  "#A5FF72",
+                  "accent":  "#8B9CF6",
                   "accent2":  "#8B7CF6",
                   "code":  "#A9DCFC",
                   "trayA":  "#8B7CF6",
                   "trayB":  "#6358C8"
               },
-    "themes":  null,
+    "themes":  {
+                   "teste":  {
+                                 "bg":  "#0E0E0E",
+                                 "card":  "#26262B",
+                                 "panel":  "#2A2A30",
+                                 "input":  "#16161A",
+                                 "border":  "#3A3A44",
+                                 "fg":  "#63FF33",
+                                 "dim":  "#6E6E7A",
+                                 "status":  "#9A9AA5",
+                                 "q":  "#C9C2FF",
+                                 "accent":  "#8B9CF6",
+                                 "accent2":  "#8B7CF6",
+                                 "code":  "#A9DCFC",
+                                 "trayA":  "#8B7CF6",
+                                 "trayB":  "#6358C8"
+                             }
+               },
     "profiles":  {
                      "zai":  {
                                  "label":  "Z.ai GLM",

@@ -246,6 +246,10 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
   mesmas 14 chaves do "theme". O botãozinho ⟲ do lado de cada hex
   devolve só aquela cor para o padrão.
 
+  Os temas "padrão" e "matrix" (verde no preto) JÁ VÊM no aplicativo:
+  aparecem primeiro na lista, dão pra aplicar, mas não são apagados
+  nem sobrescritos — os seus ficam depois deles.
+
 DESINSTALAR
   Dê dois cliques em DESINSTALAR.cmd (na pasta do kit). Ele encerra o
   app, remove o atalho da Inicialização (e a tarefa ZQuick, se

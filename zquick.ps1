@@ -106,6 +106,16 @@ $T = @{
     code   = '#A9DCFC'; trayA = '#8B7CF6'; trayB = '#6358C8'
 }
 $themeDefaults = $T.Clone()   # Onda 6: base p/ "restaurar cores padrão" no diálogo ⚙
+# v3.16.1: temas embutidos — vêm no app, aparecem primeiro na lista do ⚙ e não apagam
+$builtinThemes = [ordered]@{
+    'padrão' = $themeDefaults
+    'matrix' = [ordered]@{
+        bg = '#000000'; card = '#0A140A'; panel = '#0E1A0E'; input = '#040804'; border = '#1F4A1F'
+        fg = '#2EFF2E'; dim = '#1E8A1E'; status = '#7CD97C'
+        q = '#B4FFB4'; accent = '#00FF41'; accent2 = '#39FF14'
+        code = '#98FB98'; trayA = '#00FF41'; trayB = '#008000'
+    }
+}
 if ($cfg.theme) {
     foreach ($k in @($cfg.theme.PSObject.Properties.Name)) { if ($T.ContainsKey($k)) { $T[$k] = [string]$cfg.theme.$k } }
 }
@@ -3351,7 +3361,7 @@ function Show-Settings {
               <StackPanel Orientation="Horizontal">
                 <TextBox x:Name="SetThemeName" Width="120" ToolTip="nome do tema" FontSize="12"/>
                 <Button x:Name="SetThemeSave" Content="💾 salvar" Margin="6,0,0,0" ToolTip="guarda as 14 cores atuais das caixas com este nome"/>
-                <ComboBox x:Name="SetThemeList" Width="140" Margin="12,0,0,0" ToolTip="temas guardados no zquick.json"/>
+                <ComboBox x:Name="SetThemeList" Width="140" Margin="12,0,0,0" ToolTip="temas embutidos (padrão, matrix) + os seus guardados no zquick.json"/>
                 <Button x:Name="SetThemeLoad" Content="◀ aplicar" Margin="6,0,0,0" ToolTip="carrega o tema escolhido nas caixas de hex (✔ Aplicar grava)"/>
                 <Button x:Name="SetThemeDel" Content="🗑" Margin="6,0,0,0" ToolTip="apagar o tema escolhido da lista"/>
               </StackPanel>
@@ -3597,14 +3607,16 @@ function Show-Settings {
         $script:setFillThemes = {
             $tn = @()
             try { if ($cfg.themes) { $tn = @($cfg.themes.PSObject.Properties.Name | Sort-Object) } } catch {}
-            $script:setG['SetThemeList'].ItemsSource = $tn
-            return $tn
+            $all = @($builtinThemes.Keys) + $tn   # embutidos (padrão, matrix) primeiro
+            $script:setG['SetThemeList'].ItemsSource = $all
+            return $all
         }
         & $script:setFillThemes
         $g['SetThemeSave'].Add_Click({
             try {
                 $nm = ([string]$script:setG['SetThemeName'].Text).Trim()
                 if (-not $nm) { $script:setG['SetStatus'].Text = '✕ dê um nome ao tema'; return }
+                if ($builtinThemes.Contains($nm)) { $script:setG['SetStatus'].Text = "✕ '$nm' é tema embutido — salve com outro nome"; return }
                 $hexes = [ordered]@{}
                 foreach ($k in $script:setColorKeys) {
                     $hx = ([string]$script:setBoxes[$k].Text).Trim()
@@ -3625,7 +3637,9 @@ function Show-Settings {
             try {
                 $nm = [string]$script:setG['SetThemeList'].SelectedItem
                 if (-not $nm) { $nm = ([string]$script:setG['SetThemeList'].Text).Trim() }
-                $th = $null; try { if ($cfg.themes) { $th = $cfg.themes.$nm } } catch {}
+                $th = $null
+                if ($builtinThemes.Contains($nm)) { $th = $builtinThemes[$nm] }
+                else { try { if ($cfg.themes) { $th = $cfg.themes.$nm } } catch {} }
                 if (-not $th) { $script:setG['SetStatus'].Text = '✕ escolha um tema na lista'; return }
                 foreach ($k in $script:setColorKeys) {
                     $hx = [string](Get-CfgProp $th $k)
@@ -3639,6 +3653,7 @@ function Show-Settings {
             try {
                 $nm = [string]$script:setG['SetThemeList'].SelectedItem
                 if (-not $nm) { $nm = ([string]$script:setG['SetThemeList'].Text).Trim() }
+                if ($builtinThemes.Contains($nm)) { $script:setG['SetStatus'].Text = "✕ '$nm' é tema embutido — não dá pra apagar"; return }
                 if (-not $nm -or -not $cfg.themes) { $script:setG['SetStatus'].Text = '✕ escolha um tema para apagar'; return }
                 try { $cfg.themes.PSObject.Properties.Remove($nm) } catch {}
                 Save-Config

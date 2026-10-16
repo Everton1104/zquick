@@ -62,6 +62,20 @@ function Get-HexEdits($sw) {
 }
 function Get-Val($el) { $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value }
 function Set-Val($el, [string]$v) { $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($v) }
+function Select-Theme($cbEl, $licCond, [string]$name) {
+    $cbEl.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+    Start-Sleep -Milliseconds 400
+    $li = @($cbEl.FindAll([System.Windows.Automation.TreeScope]::Descendants, $licCond)) | Where-Object { $_.Current.Name -eq $name } | Select-Object -First 1
+    if (-not $li) { throw "tema '$name' nao esta na lista" }
+    $li.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    Start-Sleep -Milliseconds 300
+    try { $cbEl.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Collapse() } catch {}
+}
+function Get-Status($win) {
+    $el = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SetStatus')))
+    if ($el) { return [string]$el.Current.Name }
+    return ''
+}
 
 $mark0 = [IO.File]::ReadAllText($log).Length
 trap { for ($i = 0; $i -lt 3; $i++) { Tap 0x1B; Start-Sleep -Milliseconds 400 }; throw }
@@ -138,6 +152,38 @@ try { $cb.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::P
 $null = Invoke-ById $sw 'SetThemeDel'
 if (-not (Wait-Log ('tema: apagado "' + $nm) $mark1 8)) { throw 'nao logou tema apagado' }
 'tema apagado'
+
+# 6b. temas EMBUTIDOS: 'padrao' e 'matrix' vem no app (v3.16.1)
+$pad = 'padr' + [char]0xE3 + 'o'   # acento por codigo de caractere (arquivo ASCII)
+$cb.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+Start-Sleep -Milliseconds 400
+$items = @($cb.FindAll([System.Windows.Automation.TreeScope]::Descendants, $lic)) | ForEach-Object { $_.Current.Name }
+try { $cb.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Collapse() } catch {}
+"lista de temas: $($items -join ', ')"
+if ($items -notcontains $pad)   { throw "lista sem o tema embutido '$pad'" }
+if ($items -notcontains 'matrix') { throw 'lista sem o tema embutido matrix' }
+if ($items.IndexOf($pad) -gt 0 -or $items.IndexOf('matrix') -ne 1) { throw 'embutidos nao vieram primeiro' }
+Select-Theme $cb $lic 'matrix'
+$null = Invoke-ById $sw 'SetThemeLoad'
+Start-Sleep -Milliseconds 500
+if ((Get-Val $h0) -ne '#000000') { throw "matrix nao aplicou (1a cor = $(Get-Val $h0), esperava #000000)" }
+'matrix aplicado (bg #000000)'
+Select-Theme $cb $lic $pad
+$null = Invoke-ById $sw 'SetThemeLoad'
+Start-Sleep -Milliseconds 500
+if ((Get-Val $h0) -ne '#202024') { throw "padrao nao aplicou (1a cor = $(Get-Val $h0), esperava #202024)" }
+'padrao aplicado (bg #202024)'
+# salvar com nome reservado e apagar embutido = recusados
+Set-Val $nameBox 'matrix'
+$null = Invoke-ById $sw 'SetThemeSave'
+Start-Sleep -Milliseconds 400
+if ((Get-Status $sw) -notmatch 'embutido') { throw 'salvar com nome de embutido nao foi recusado' }
+'salvar sobre embutido: recusado'
+Select-Theme $cb $lic $pad
+$null = Invoke-ById $sw 'SetThemeDel'
+Start-Sleep -Milliseconds 400
+if ((Get-Status $sw) -notmatch 'embutido') { throw 'apagar embutido nao foi recusado' }
+'apagar embutido: recusado'
 
 # 7. devolve a cor original do usuario e fecha sem crash
 Set-Val $h0 $v0
