@@ -4,7 +4,7 @@
     "hotkey":  "alt+q",
     "maxTokens":  4096,
     "maxRounds":  16,
-    "autoCompact":  true,
+    "autoCompact":  false,
     "searchEngine":  "zai-server",
     "promptCache":  true,
     "hideOnBlur":  false,
@@ -40,6 +40,7 @@
     "themes":  {
 
                },
+    "ctxLimits":  null,
     "profiles":  {
                      "zai":  {
                                  "label":  "Z.ai GLM",

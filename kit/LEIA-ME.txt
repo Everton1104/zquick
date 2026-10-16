@@ -176,11 +176,18 @@ AGENTE WINDOWS (tarefas no PC)
 
 CONVERSA LONGA (compactação)
   A conversa inteira é reenviada a cada pergunta (é assim que o
-  modelo mantém contexto). Quando cresce demais (~28 mensagens ou
-  ~150 KB), o app PERGUNTA se pode compactar: as trocas antigas
-  viram um resumo e as últimas 6 mensagens ficam intactas. Se
-  crescer além do teto (~40 mensagens / 300 KB), o início é
-  descartado automaticamente para não travar.
+  modelo mantém contexto). O rodapé, no canto direito, mostra o
+  consumo: "ctx 12% · ≈18.2k/200k" — percentual, contagem
+  aproximada de TOKENS e o limite do modelo em uso (o app já sabe
+  os da Z.ai/Kimi/DeepSeek/MiniMax/Qwen; modelo desconhecido =
+  128k, e dá para declarar os seus em "ctxLimits" no json).
+  Quando passa de ~28 mensagens ou 55% do limite, o app PERGUNTA
+  se pode compactar — a pergunta em si traz a contagem (mensagens,
+  KB e ≈tokens do contexto). As trocas antigas viram um resumo e
+  as últimas 6 mensagens ficam intactas. Se passar de ~40
+  mensagens ou 80% do limite, o início é descartado automaticamente
+  para não travar. Em qualquer dos casos o histórico completo
+  continua salvo no disco.
 
 CONFIG EXTRA (zquick.json, topo)
   hotkey ......... "alt+q" (win/ctrl/alt/shift+tecla; combinação com
@@ -193,6 +200,12 @@ CONFIG EXTRA (zquick.json, topo)
   promptCache .... true = cache do prompt no servidor (a Z.ai aceita:
                    as perguntas seguintes da conversa ficam mais
                    baratas e o 1º token chega mais rápido)
+  ctxLimits ...... override do LIMITE DE CONTEXTO por modelo, em
+                   tokens (o rodapé e a compactação usam esse
+                   número): "ctxLimits": { "glm-4.7": 200000,
+                   "meu-modelo": 512000 }. Sem isso vale a tabela
+                   interna: kimi/minimax 256k; glm "cheio" 200k;
+                   glm flash/air/mini/lite, deepseek e qwen 128k
   systemPrompt ... troca a personalidade do assistente
   mcpServers ..... servidores MCP (stdio): { "nome": { "command":
                    "...", "args": [...] } } — as tools deles ficam

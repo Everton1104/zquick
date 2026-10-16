@@ -52,6 +52,7 @@ $cfg = @{
     answerFontSize = 13
     theme         = $null
     themes        = $null      # v3.16: { "nome": { 14 cores } } — temas salvos no ⚙
+    ctxLimits     = $null      # v3.17: { "id-do-modelo": tokens } — override do limite de contexto
     allow         = @{ runPs = @(); paths = @() }   # "sempre permitir": comandos exatos + pastas liberadas
     mcpServers    = $null      # Onda 4: { "nome": { "command": "...", "args": [...], "env": {...} } } — servidores MCP stdio
     profiles      = @{
@@ -69,7 +70,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','autoCompact','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','autoCompact','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers','ctxLimits')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.window) {
@@ -159,7 +160,7 @@ function Save-Config {
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
             passthrough = $cfg.passthrough
             window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
-            theme = $cfg.theme; themes = $cfg.themes; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
+            theme = $cfg.theme; themes = $cfg.themes; ctxLimits = $cfg.ctxLimits; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
         [pscustomobject]$out | ConvertTo-Json -Depth 6 | Set-Content -Path $cfgPath -Encoding utf8
     } catch { Log "save-config: $_" }
@@ -405,6 +406,7 @@ public class Engine {
     int _confAuto;   // v3.13: 1 = usuario escolheu "auto-compactar" no confirm de compactacao
     bool _srvSearch;   // busca server-side Z.ai (server tool no /v1/messages — sonda 13/10)
     bool _cacheCtl;    // cache_control no system + ultima tool (provado por sonda: 1550->14 input tokens)
+    int _ctxWarnChars = 150000, _ctxHardChars = 300000; string _ctxLabel = "";   // v3.17: limites de contexto do MODELO (SetCtxChars; ~4 chars/token)
     readonly List<string> _history = new List<string>();
     readonly object _sync = new object();
     volatile int _busy = 0;
@@ -475,6 +477,8 @@ public class Engine {
     public void SetMaxRounds(int n) { lock (_sync) { if (n >= 2 && n <= 40) _maxRounds = n; } }
     public void SetPassthrough(bool on) { _passThrough = on; }   // liga/desliga em runtime (botao da toolbar)
     public void SetAutoCompact(bool on) { _autoCompact = on; }   // v3.13: autocompact (config autoCompact ou botao do confirm)
+    // v3.17: warn/hard em CHARS derivados do limite do modelo (tokens*4) + rotulo p/ a pergunta de compactacao
+    public void SetCtxChars(int warn, int hard, string label) { _ctxWarnChars = warn; _ctxHardChars = hard; _ctxLabel = label ?? ""; }
 
     public void Reset() {
         lock (_sync) { _history.Clear(); _full.Clear(); _compactAsked = false; _planOk = false; _mtNeed = 0; try { _cts.Cancel(); } catch {} }
@@ -887,18 +891,18 @@ public class Engine {
             }
             // conversa crescendo: compacta (resumo) antes de bater no teto duro. v3.13:
             // o resumo e' SO' para a API — o historico COMPLETO (_full) continua salvo no disco
-            bool askCompact = false; int msgN = 0; double kb = 0;
+            bool askCompact = false; int msgN = 0; double kb = 0; int tokK = 0;
             lock (_sync) {
                 double chars = 0; foreach (string h in _history) chars += h.Length;
-                if (_history.Count > 40 || chars > 300000) { _history.Clear(); _compactAsked = false; Emit("note", "contexto antigo descartado (o histórico completo continua salvo)"); }
-                else if (!_compactAsked && (_history.Count > 28 || chars > 150000)) {
-                    _compactAsked = true; askCompact = true; msgN = _history.Count; kb = chars / 1024;
+                if (_history.Count > 40 || chars > _ctxHardChars) { _history.Clear(); _compactAsked = false; Emit("note", "contexto antigo descartado (o histórico completo continua salvo)"); }
+                else if (!_compactAsked && (_history.Count > 28 || chars > _ctxWarnChars)) {
+                    _compactAsked = true; askCompact = true; msgN = _history.Count; kb = chars / 1024; tokK = (int)(chars / 4000);
                 }
             }
             if (askCompact) {
                 if (_autoCompact) { Emit("status", "🧹 autocompact: resumindo trocas antigas…"); CompactHistory(ct); }
                 else {
-                    int cc = GateCompact(string.Format("{0} mensagens • {1:0} KB. Resumir as trocas antigas (mantendo as últimas intactas) para a conversa continuar leve? O histórico completo continua salvo — o resumo é só para a API.", msgN, kb), ct);
+                    int cc = GateCompact(string.Format("{0} mensagens • {1:0} KB • ≈{2}k tokens do contexto {3}. Resumir as trocas antigas (mantendo as últimas intactas) para a conversa continuar leve? O histórico completo continua salvo — o resumo é só para a API.", msgN, kb, tokK, _ctxLabel), ct);
                     if (cc == 1) CompactHistory(ct);
                     else if (cc == 2) {
                         _autoCompact = true;
@@ -2215,6 +2219,34 @@ function Get-ActiveProfile {
 # v3.10: a lista de modelos pode carregar "⭐" de recomendado no fim (só exibição) —
 # o id limpo (sem estrela) é o que vai pra API
 function Clean-ModelId([string]$m) { ([string]$m).Trim() -replace '\s*⭐\s*$','' }
+# v3.17: limite de contexto por modelo (tokens) — tabela + override exato no json (secao ctxLimits)
+function Get-CtxLimit([string]$model) {
+    $m = Clean-ModelId $model
+    try { if ($cfg.ctxLimits) { $o = Get-CfgProp $cfg.ctxLimits $m; if ($o) { return [int]$o } } } catch {}
+    if ($m -match '(?i)kimi')   { return 256000 }
+    if ($m -match '(?i)minimax') { return 256000 }
+    if ($m -match '(?i)glm') {
+        if ($m -match '(?i)flash|air|mini|lite') { return 128000 }
+        return 200000
+    }
+    if ($m -match '(?i)deepseek|qwen') { return 128000 }
+    return 128000
+}
+# modelo que define o limite no momento ('auto' assume o bigModel do perfil)
+function Get-ActiveCtxModel {
+    $m = Clean-ModelId ([string]$cfg.model)
+    if (-not $m -or $m -eq 'auto') { $m = Clean-ModelId ([string](Get-CfgProp (Get-ActiveProfile) 'bigModel')) }
+    if (-not $m) { $m = 'glm' }
+    $m
+}
+# empurra warn/hard (chars, ~4 chars/token) + rotulo pro engine — na criacao e na troca de modelo
+function Set-CtxForEngine {
+    try {
+        $m = Get-ActiveCtxModel
+        $lim = Get-CtxLimit $m
+        if ($script:engine) { $script:engine.SetCtxChars([int]($lim * 0.55 * 4), [int]($lim * 0.8 * 4), ('{0}k ({1})' -f [int]($lim / 1000), $m)) }
+    } catch { Log "ctxcfg: $_" }
+}
 function New-EngineFromProfile {
     $p = Get-ActiveProfile
     $auth = Resolve-ProfileAuth $p
@@ -2228,6 +2260,8 @@ function New-EngineFromProfile {
     if ($p.visionModel) { $eng.SetVisionModel([string]$p.visionModel) }
     if ($cfg.maxRounds) { $eng.SetMaxRounds([int]$cfg.maxRounds) }   # v3.11: teto de rodadas por turno (default 16)
     if ($cfg.autoCompact) { $eng.SetAutoCompact($true) }   # v3.13: compacta sem perguntar
+    $ctxM = Get-ActiveCtxModel   # v3.17: warn/hard do autocompact pelo limite do modelo
+    $eng.SetCtxChars([int]((Get-CtxLimit $ctxM) * 0.55 * 4), [int]((Get-CtxLimit $ctxM) * 0.8 * 4), ('{0}k ({1})' -f [int]((Get-CtxLimit $ctxM) / 1000), $ctxM))
     if ($cfg.passthrough) { $eng.SetPassthrough($true) }   # v3.12: passthrough memorizado no json volta ligado
     $eng.MemPath = $memFile
     # Onda 5: skills .md ao lado do app — lista {name,file} entregue ao engine
@@ -2848,13 +2882,17 @@ function Finish-Turn {
     }
 }
 
-# rodape: modelo + consumo estimado do contexto (100% = limiar de compactacao, 150k chars)
+# rodape: modelo + consumo estimado do contexto (≈4 chars/token; 100% = limite DO MODELO)
 function Update-CtxMeter {
     try {
         $chars = 0
         if ($script:engine) { foreach ($h in @($script:engine.GetHistory())) { $chars += ([string]$h).Length } }
-        $pct = [int](100 * $chars / 150000); if ($pct -gt 100) { $pct = 100 }
-        $ModelText.Text = if ($script:modelLabel) { "{0} • ctx {1}%" -f $script:modelLabel, $pct } else { "ctx ${pct}%" }
+        $lim = Get-CtxLimit (Get-ActiveCtxModel)
+        $tok = [int]($chars / 4)
+        $pct = [int](100 * $tok / $lim); if ($pct -gt 100) { $pct = 100 }
+        $kt = if ($tok -ge 1000) { '{0:0.#}k' -f ($tok / 1000.0) } else { [string]$tok }
+        $ctxStr = 'ctx {0}% · ≈{1}/{2:0}k' -f $pct, $kt, ($lim / 1000.0)
+        $ModelText.Text = if ($script:modelLabel) { '{0} • {1}' -f $script:modelLabel, $ctxStr } else { $ctxStr }
     } catch { Log "ctx: $_" }
 }
 
@@ -4689,6 +4727,7 @@ $ModelBox.Add_SelectionChanged({
     $m = if ($sel -eq 'auto (rápida⇄forte)') { 'auto' } else { (Clean-ModelId $sel) }
     $cfg.model = $m; Save-Config
     if ($null -ne $script:engine) { $script:engine.SetModel($m) }
+    Set-CtxForEngine   # v3.17: limites de compactacao acompanham o modelo escolhido
     $script:modelLabel = $sel
     Update-CtxMeter
     $StatusText.Text = "modelo: $sel"
