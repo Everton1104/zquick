@@ -2326,7 +2326,6 @@ $xamlStr = @'
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
           <ComboBox x:Name="ProfileBox" Width="110" FontSize="12" VerticalContentAlignment="Center" ToolTip="Perfil / provedor LLM" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <ComboBox x:Name="ModelBox" Width="135" FontSize="12" Margin="8,0,0,0" VerticalContentAlignment="Center" ToolTip="Modelo" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <Button x:Name="CopyBtn" Content="Copiar" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
           <Button x:Name="TopBtn" Content="📌" Margin="8,0,0,0" ToolTip="sempre no topo — manter a janela sobre as outras" WindowChrome.IsHitTestVisibleInChrome="True"/>
@@ -2415,7 +2414,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','CopyBtn','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -2566,6 +2565,37 @@ $script:curAnswer = ''
 $script:lastAnswer = ''
 $script:pendSources = @()
 $script:livePanel = $null
+$script:liveCopyBtn = $null   # v3.14: botao ⧉ do card ao vivo — Finish-Turn preenche o Tag
+# clipboard via Win32 (v3.14): Set-Clipboard do PS 5.1 trava/colide com retry interno longo;
+# OpenClipboard+SetClipboardData com retry curto e' deterministico
+Add-Type -Namespace ZQ -Name Clip -MemberDefinition @'
+[DllImport("user32.dll", SetLastError=true)] public static extern bool OpenClipboard(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool EmptyClipboard();
+[DllImport("user32.dll")] public static extern bool CloseClipboard();
+[DllImport("user32.dll")] public static extern IntPtr SetClipboardData(uint fmt, IntPtr data);
+[DllImport("kernel32.dll")] public static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+[DllImport("kernel32.dll")] public static extern IntPtr GlobalLock(IntPtr h);
+[DllImport("kernel32.dll")] public static extern bool GlobalUnlock(IntPtr h);
+[DllImport("kernel32.dll")] public static extern IntPtr GlobalFree(IntPtr h);
+'@
+function Set-ClipText([string]$text) {
+    $bytes = [Text.Encoding]::Unicode.GetBytes($text + [string][char]0)
+    for ($i = 0; $i -lt 12; $i++) {
+        if (-not [ZQ.Clip]::OpenClipboard([IntPtr]::Zero)) { Start-Sleep -Milliseconds 120; continue }
+        try {
+            $null = [ZQ.Clip]::EmptyClipboard()
+            $h = [ZQ.Clip]::GlobalAlloc(2, [UIntPtr][uint64]$bytes.Length)   # GMEM_MOVEABLE
+            if ($h -eq [IntPtr]::Zero) { return $false }
+            $p = [ZQ.Clip]::GlobalLock($h)
+            if ($p -eq [IntPtr]::Zero) { $null = [ZQ.Clip]::GlobalFree($h); return $false }
+            [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $p, $bytes.Length)
+            $null = [ZQ.Clip]::GlobalUnlock($h)
+            if ([ZQ.Clip]::SetClipboardData(13, $h) -eq [IntPtr]::Zero) { $null = [ZQ.Clip]::GlobalFree($h); return $false }  # 13 = CF_UNICODETEXT
+            return $true
+        } finally { $null = [ZQ.Clip]::CloseClipboard() }
+    }
+    return $false
+}
 # anexos: {Kind: img|txt|pdf, Name, B64, Text}
 $script:attachments = [System.Collections.Generic.List[object]]::new()
 $script:confirmId = 0
@@ -2651,6 +2681,39 @@ function New-Card([string]$title) {
     @{ Section = $sec; Blocks = $sec.Blocks }
 }
 
+function Add-CopyIcon([System.Windows.Documents.BlockCollection]$blocks) {
+    # v3.14: icone de copiar no topo direito do card do bot (o botao "Copiar" saiu
+    # da barra). O texto a copiar vive no Tag — setado no fim do turno (Finish-Turn)
+    # ou no load da conversa. Devolve o botao pra alguem preencher o Tag.
+    $btn = [System.Windows.Controls.Button]::new()
+    $btn.Content = [string][char]0x29C9
+    $btn.FontSize = (FSz 11)
+    $btn.Padding = '4,1'
+    $btn.Background = [System.Windows.Media.Brushes]::Transparent
+    $btn.BorderThickness = '0'
+    $btn.Foreground = $T.dim
+    $btn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btn.Opacity = 0.5
+    $btn.HorizontalAlignment = 'Right'
+    $btn.ToolTip = 'copiar resposta'
+    $btn.Tag = ''
+    $btn.Add_Click({ param($s2,$e2)
+        try {
+            if (-not $s2.Tag) { $StatusText.Text = 'nada para copiar ainda'; Log 'copiar: tag vazia'; return }
+            $txt3 = [string]$s2.Tag
+            if (Set-ClipText $txt3) { $StatusText.Text = 'resposta copiada'; Log ("copiar: {0} chars pro clipboard" -f $txt3.Length) }
+            else { $StatusText.Text = 'clipboard ocupado — tenta de novo'; Log 'copiar erro: clipboard ocupado' }
+        } catch { Log ('copiar erro: ' + $_.Exception.Message) }
+    }.GetNewClosure())
+    $btn.Add_MouseEnter({ param($s2,$e2) $s2.Opacity = 1 }.GetNewClosure())
+    $btn.Add_MouseLeave({ param($s2,$e2) $s2.Opacity = 0.5 }.GetNewClosure())
+    $buc = [System.Windows.Documents.BlockUIContainer]::new()
+    $buc.Child = $btn
+    $buc.Margin = '0,0,0,2'
+    $blocks.Add($buc) | Out-Null
+    return $btn
+}
+
 function Scroll-AnswerToEnd {
     try {
         $sv = $AnswerView.Template.FindName('PART_ContentHost', $AnswerView)
@@ -2716,6 +2779,7 @@ function Finish-Turn {
     $ConfirmBar.Visibility = 'Collapsed'
     $PlanBar.Visibility = 'Collapsed'
     $script:lastAnswer = $script:curAnswer
+    if ($script:liveCopyBtn) { $script:liveCopyBtn.Tag = $script:lastAnswer }   # v3.14: icone do card copia a resposta certa
     $el = if ($script:sendTime -gt [datetime]::MinValue) { [int]((Get-Date) - $script:sendTime).TotalSeconds } else { 0 }
     $StatusText.Text = "Pronto • ${el}s"
     $prev = ($script:lastAnswer -replace '\s+', ' ').Trim()
@@ -2957,8 +3021,11 @@ function Send-Current {
     Add-MdLines $q.Blocks $qtxt $true
     $AnswerDoc.Blocks.Add($q.Section) | Out-Null
     $a = New-Card $null
+    $script:liveCopyBtn = Add-CopyIcon $a.Blocks      # topo direito (v3.14)
+    $inner = [System.Windows.Documents.Section]::new()  # texto vive aqui dentro: o Update-LiveAnswer nao apaga o icone
+    $null = $a.Section.Blocks.Add($inner)
     $AnswerDoc.Blocks.Add($a.Section) | Out-Null
-    $script:livePanel = $a.Blocks
+    $script:livePanel = $inner.Blocks
     $script:curAnswer = ''; $script:pendSources = @()
 
     $InputBox.Clear()
@@ -3092,6 +3159,8 @@ function Load-Conversation([string]$file) {
             $o = $m | ConvertFrom-Json
             $isUser = ([string]$o.role -eq 'user')
             $c = New-Card $null
+            $cbtn = $null; $botTxt = ''
+            if (-not $isUser) { $cbtn = Add-CopyIcon $c.Blocks }   # v3.14: cada resposta retomada ganha o icone de copiar
             $any = $false
             foreach ($b in @($o.content)) {
                 if ([string]$b.type -eq 'text') {
@@ -3099,7 +3168,7 @@ function Load-Conversation([string]$file) {
                     if (-not $txt) { continue }
                     $any = $true
                     if ($isUser) { Add-MdLines $c.Blocks ("❯ " + $txt) $true }
-                    else { Add-MdLines $c.Blocks $txt $false; $script:lastAnswer = $txt }
+                    else { Add-MdLines $c.Blocks $txt $false; $script:lastAnswer = $txt; $botTxt += $txt }
                 } elseif ([string]$b.type -eq 'image') {
                     $any = $true
                     try {
@@ -3121,6 +3190,7 @@ function Load-Conversation([string]$file) {
                     } catch { Log "hist-img: $_" }
                 }
             }
+            if ($cbtn -and $botTxt) { $cbtn.Tag = $botTxt }   # icone copia a resposta deste card
             if ($any) { $AnswerDoc.Blocks.Add($c.Section) | Out-Null }
         }
         Scroll-AnswerToEnd
@@ -4090,7 +4160,6 @@ $MaxBtn.Add_Click({
 $SettingsBtn.Add_Click({ Show-Settings })
 $NewBtn.Add_Click({ New-Conversation })
 $HistBtn.Add_Click({ Show-History })
-$CopyBtn.Add_Click({ if ($script:lastAnswer) { Set-Clipboard -Value $script:lastAnswer; $StatusText.Text = 'resposta copiada' } })
 $ConfirmYes.Add_Click({
     if ($script:engine) { $script:engine.Confirm([int]$script:confirmId, $true) }
     $ConfirmBar.Visibility = 'Collapsed'; $StatusText.Text = 'executando…'
