@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.20'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.21'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -608,7 +608,12 @@ public class Engine {
 
     public void Ask(string userText, List<string> imagesPngB64, string systemPrompt) { Ask(userText, imagesPngB64, null, null, systemPrompt); }
 
-    public void Ask(string userText, List<string> imagesPngB64, List<string[]> textFiles, List<string[]> pdfFiles, string systemPrompt) {
+    public void Ask(string userText, List<string> imagesPngB64, List<string[]> textFiles, List<string[]> pdfFiles, string systemPrompt) { Ask(userText, imagesPngB64, textFiles, pdfFiles, systemPrompt, false); }
+
+    // v3.21: planApproved = o turno nasce com a isenção em lote (aprovação do plano
+    // TEXTUAL — o modelo escreveu o plano como resposta e o usuário aprovou pelo
+    // botão; não houve tool plan/GatePlan para ligar _planOk dentro do turno)
+    public void Ask(string userText, List<string> imagesPngB64, List<string[]> textFiles, List<string[]> pdfFiles, string systemPrompt, bool planApproved) {
         lock (_sync) {
             if (_busy == 1) return;
             _busy = 1; _cts = new CancellationTokenSource();
@@ -617,7 +622,7 @@ public class Engine {
         t.IsBackground = true;
         // copias locais p/ thread
         string ut = userText; List<string> im = imagesPngB64; List<string[]> tf = textFiles; List<string[]> pf = pdfFiles; string sy = systemPrompt;
-        t.Start(new object[] { ut, im, sy, tf, pf });
+        t.Start(new object[] { ut, im, sy, tf, pf, planApproved });
     }
 
     // ---------- confirmacao de acoes locais (UI mostra, usuario decide, expira 45s) ----------
@@ -890,6 +895,7 @@ public class Engine {
             lock (_sync) {
                 _useBig = false;
                 _planOk = false;   // aprovacao de plano vale so' ate' o fim do turno
+                if (a.Length > 5 && (bool)a[5]) _planOk = true;   // v3.21: plano textual aprovado pelo botão — turno já isento
                 _useVision = _auto && imgB64 != null && imgB64.Count > 0;   // imagem em auto -> modelo com visao
                 // anexo de TEXTO sem imagem -> modelo grande: o flash ignora o conteudo
                 // inline e sai "procurando" o arquivo no disco (10x file_list, resposta
@@ -2350,7 +2356,7 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "Quando a tarefa tiver ambiguidade ou decisão que cabe ao usuário (qual abordagem, qual arquivo, escopo, preferência), pergunte UMA vez com ask_user: " +
      "de 1 a 4 perguntas de uma vez (questions), cada uma com 2-4 opções de label curto + descrição do que a escolha implica; quando estiver comparando artefatos concretos (código, mockup, config), inclua 'preview' nas opções. " +
      "O usuário pode responder texto livre ou cancelar; se cancelar/não responder, decida sozinho a opção mais conservadora e informe — não repita a pergunta. " +
-     "Antes de executar 3+ ações que ALTERAM arquivos ou o sistema (criar/editar/mover/apagar, comandos), PROponha com plan {title, steps[]}: o usuário aprova UMA vez e as ações rodam sem confirmação individual; se rejeitar, nada executa — replique o plano ajustado ou pergunte. " +
+     "Antes de executar 3+ ações que ALTERAM arquivos ou o sistema (criar/editar/mover/apagar, comandos), PROponha com plan {title, steps[]}: o usuário aprova UMA vez e as ações rodam sem confirmação individual; se rejeitar, nada executa — replique o plano ajustado ou pergunte. O plano é SEMPRE a chamada da tool plan — NUNCA escreva o plano como texto e pare (texto não gera botão de aprovação; sem aprovação, nada executa). " +
      "Ao mexer com arquivos, confirme os caminhos com file_list antes. " +
      "Tools com prefixo mcp_ vêm de servidores externos (MCP) configurados pelo usuário — use-as como usaria as built-in quando fizer sentido. " +
      "A tool research dispara um SUBAGENTE de leitura com contexto próprio (ele NÃO vê esta conversa) para investigações amplas — muitos arquivos/pastas ou buscas repetidas: passe uma tarefa autocontida e use o relatório que voltar; para uma leitura/busca única use file_read/web_search direto. " +
@@ -2560,6 +2566,16 @@ $xamlStr = @'
             </StackPanel>
           </StackPanel>
         </Border>
+        <Border x:Name="QueueBar" Visibility="Collapsed" Background="#3A3A44" CornerRadius="6" Margin="14,6,14,0" Padding="10,8">
+          <StackPanel>
+            <TextBlock x:Name="QueueHeader" Foreground="#9A9AA5" FontSize="10" FontWeight="SemiBold"
+                       Text="✉ NA FILA — ENVIA SOZINHA QUANDO A RESPOSTA ACABAR"/>
+            <ScrollViewer x:Name="QueueScroll" MaxHeight="120" Margin="0,4,0,0"
+                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel x:Name="QueuePanel"/>
+            </ScrollViewer>
+          </StackPanel>
+        </Border>
         <DockPanel Margin="14,8,14,6">
           <Button x:Name="SendBtn" DockPanel.Dock="Right" Content="Enviar" Padding="14,8" Margin="8,0,0,0" FontSize="13" FontWeight="SemiBold"/>
           <TextBox x:Name="InputBox" Height="68" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
@@ -2582,7 +2598,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','QueueBar','QueueHeader','QueueScroll','QueuePanel','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -2667,6 +2683,7 @@ try {
 if ($cfg.answerFont)     { try { $AnswerDoc.FontFamily = [System.Windows.Media.FontFamily]::new([string]$cfg.answerFont) } catch {} }
 $InputBox.Height = FSz 68          # altura fixa do composer escala junto (senao o textarea espreme o texto maior)
 $AttachScroll.MaxHeight = FSz 76
+$QueueScroll.MaxHeight = FSz 120   # v3.21: cartão da fila acompanha a escala
 
 # v3.8: re-escala AO VIVO a janela principal (walk visual + conteudo do documento):
 # todo elemento com FontSize local (do XAML pre-escalado ou FSz no codigo) e' re-multiplicado por novo/velho
@@ -2678,6 +2695,7 @@ function Set-FontScale([double]$newScale) {
     $script:fscale = $newScale
     $InputBox.Height = [Math]::Round(68 * $newScale, 1)       # composer acompanha (fixa no XAML, fora do walk)
     $AttachScroll.MaxHeight = [Math]::Round(76 * $newScale, 1)
+    $QueueScroll.MaxHeight = [Math]::Round(120 * $newScale, 1)
     $ctrlProp = [System.Windows.Controls.Control]::FontSizeProperty
     $tbProp   = [System.Windows.Controls.TextBlock]::FontSizeProperty
     $txtProp  = [System.Windows.Documents.TextElement]::FontSizeProperty
@@ -2741,7 +2759,14 @@ $window.Add_LocationChanged({
 $script:busy = $false
 $script:exiting = $false
 $script:stopped = $false     # veio 'stopped' do engine: resposta interrompida a pedido
-$script:queued = $null       # mensagem digitada durante a resposta (envia sozinha no fim do turno)
+$script:queuedMsgs = @()          # v3.21: mensagens digitadas durante a resposta — lista visível no cartão ✉
+                             # (✎ edita / ✕ descarta); despacha sozinha, uma por turno, na ordem
+$script:liveDirty = $false   # v3.21: throttle do render ao vivo — delta só marca; reparse do
+$script:lastLive = [datetime]::MinValue   # markdown roda no máx 1x/400ms (resposta longa travava a UI)
+$script:planMode = 'gate'    # v3.21: 'gate' = tool plan esperando decisão no turno;
+                             # 'text' = plano escrito como resposta (turno já fechou) — botão aprova/executa
+$script:pendingPlanOk = $false   # v3.21: próximo envio nasce isento (aprovação de plano textual)
+$script:planGateSeen = $false    # v3.21: o turno já mostrou plano via tool (não duplicar botão textual)
 $script:curAnswer = ''
 $script:lastAnswer = ''
 $script:pendSources = @()
@@ -2957,6 +2982,7 @@ function Set-Busy([bool]$b) {
 function Finish-Turn {
     if (-not $script:busy) { return }
     Set-Busy $false
+    $script:liveDirty = $false   # v3.21: o Update-LiveAnswer logo abaixo é o render final
     $ConfirmBar.Visibility = 'Collapsed'
     $PlanBar.Visibility = 'Collapsed'
     $script:lastAnswer = $script:curAnswer
@@ -2982,19 +3008,35 @@ function Finish-Turn {
     Add-SourcesFooter
     Save-History
     Update-CtxMeter
-    # mensagem na fila (digitada durante a resposta): envia sozinha. Timer 1-tiro
-    # afasta a corrida com o finally do engine (busy=0) e deixa o "Pronto" respirar.
-    if ($script:queued) {
+    # v3.21: plano TEXTUAL — o modelo escreveu o plano como resposta final (sem
+    # tool plan) e o turno fechou "mudo"? Oferece o mesmo botão de aprovação;
+    # aprovar envia a execução já isenta (pendingPlanOk). Com fila pendente não
+    # abre (o despacho da fila leva a vez — ver tick abaixo).
+    if (-not $script:planGateSeen -and @($script:queuedMsgs).Count -eq 0) {
+        $tp = Test-TextPlan $script:lastAnswer
+        if ($tp) { Show-TextPlanBar $tp }
+    }
+    # mensagens na fila (digitadas durante a resposta): enviam sozinhas, uma por
+    # turno. Timer 1-tiro afasta a corrida com o finally do engine (busy=0) e deixa
+    # o "Pronto" respirar; se o turno foi ocupado de novo antes do tick, o item
+    # espera o próximo fim de turno (não se perde).
+    if (@($script:queuedMsgs).Count -gt 0) {
         $qt = [System.Windows.Threading.DispatcherTimer]::new()
         $qt.Interval = [TimeSpan]::FromMilliseconds(400)
         $qt.Add_Tick({
             param($s2, $e2)
             $s2.Stop()
-            $q = $script:queued; $script:queued = $null
-            if (-not $q -or $script:busy) { return }
+            if ($script:busy) { return }
+            $items = @($script:queuedMsgs)
+            if ($items.Count -eq 0) { return }
+            $q = $items[0]
+            $script:queuedMsgs = @($items | Select-Object -Skip 1)
+            Update-QueueBar
+            if ($script:planMode -eq 'text' -and $PlanBar.Visibility -eq 'Visible') {
+                Hide-PlanBar; $script:planMode = 'gate'; Log 'plano-texto: dispensado (mensagem da fila despachada)'
+            }
             try {
-                foreach ($it in @($q.items)) { $script:attachments.Add($it); New-FileChip ([string]$it.Name) }
-                if (@($q.items).Count -gt 0) { $AttachScroll.Visibility = 'Visible' }
+                Restore-QueuedItems $q.items
                 $InputBox.Text = [string]$q.text
                 Log 'fila: despachada'
                 Send-Current
@@ -3075,6 +3117,83 @@ function New-FileChip([string]$name) {
     $chip.Child = $sp
     $AttachPanel.Children.Add($chip) | Out-Null
     $AttachScroll.Visibility = 'Visible'
+}
+
+# v3.21: devolve ao composer os anexos de uma mensagem da fila (despacho
+# automatico ou botao ✎) — mesmo passo que o despacho antigo fazia inline
+function Restore-QueuedItems($items) {
+    foreach ($it in @($items)) { $script:attachments.Add($it); New-FileChip ([string]$it.Name) }
+    if (@($items).Count -gt 0) { $AttachScroll.Visibility = 'Visible' }
+}
+
+# v3.21: cartão "✉ na fila" acima do input — cada mensagem digitada durante a
+# resposta aparece aqui (texto + anexos) enquanto espera. ✎ devolve ao campo de
+# digitação para editar e reenviar; ✕ descarta. O painel é remontado a cada
+# mudança, então o botão carrega o próprio item no Tag (índice ficaria velho).
+function Update-QueueBar {
+    $QueuePanel.Children.Clear()
+    $items = @($script:queuedMsgs)
+    if ($items.Count -eq 0) { $QueueBar.Visibility = 'Collapsed'; return }
+    $QueueBar.Visibility = 'Visible'
+    $QueueHeader.Text = if ($items.Count -eq 1) { '✉ NA FILA — ENVIA SOZINHA QUANDO A RESPOSTA ACABAR' }
+                        else { "✉ NA FILA ($($items.Count)) — ENVIAM SOZINHAS QUANDO A RESPOSTA ACABAR" }
+    $i = 0
+    foreach ($q in $items) {
+        $i++
+        $card = [System.Windows.Controls.Border]::new()
+        $card.Background = $T.input; $card.BorderBrush = $T.border; $card.BorderThickness = '1'
+        $card.CornerRadius = '4'; $card.Margin = '0,4,0,0'; $card.Padding = '6,4'
+        $box = [System.Windows.Controls.StackPanel]::new()
+        $row = [System.Windows.Controls.DockPanel]::new()
+        # ✕ primeiro: no DockPanel, o primeiro dock Right fica na ponta direita
+        $xb = [System.Windows.Controls.Button]::new(); $xb.Content = '✕'
+        [System.Windows.Automation.AutomationProperties]::SetAutomationId($xb, "QDel$i")
+        $xb.ToolTip = 'Descartar esta mensagem da fila'
+        $xb.Padding = '4,2'; $xb.FontSize = (FSz 10); $xb.VerticalAlignment = 'Center'
+        $xb.Tag = $q
+        $xb.Add_Click({ param($s, $e)
+            $q2 = $s.Tag
+            $script:queuedMsgs = @(foreach ($x in @($script:queuedMsgs)) { if (-not [object]::ReferenceEquals($x, $q2)) { $x } })
+            Update-QueueBar
+            $n = @($script:queuedMsgs).Count
+            $StatusText.Text = if ($n -gt 0) { "✉ descartada — $n na fila" } else { '✉ descartada — fila vazia' }
+            Log 'fila: mensagem descartada'
+        })
+        [System.Windows.Controls.DockPanel]::SetDock($xb, 'Right')
+        $row.Children.Add($xb) | Out-Null
+        $eb = [System.Windows.Controls.Button]::new(); $eb.Content = '✎'
+        [System.Windows.Automation.AutomationProperties]::SetAutomationId($eb, "QEdit$i")
+        $eb.ToolTip = 'Editar — devolve a mensagem ao campo de digitação'
+        $eb.Padding = '4,2'; $eb.FontSize = (FSz 10); $eb.VerticalAlignment = 'Center'
+        $eb.Tag = $q
+        $eb.Add_Click({ param($s, $e)
+            $q2 = $s.Tag
+            $script:queuedMsgs = @(foreach ($x in @($script:queuedMsgs)) { if (-not [object]::ReferenceEquals($x, $q2)) { $x } })
+            Restore-QueuedItems $q2.items
+            $InputBox.Text = [string]$q2.text
+            $InputBox.CaretIndex = $InputBox.Text.Length
+            $null = $InputBox.Focus()
+            Update-QueueBar
+            $StatusText.Text = '✉ devolvida ao campo — Enter reenvia (volta à fila se ainda estiver respondendo)'
+            Log ('fila: mensagem devolvida p/ edição (' + ([string]$q2.text).Length + ' chars)')
+        })
+        [System.Windows.Controls.DockPanel]::SetDock($eb, 'Right')
+        $row.Children.Add($eb) | Out-Null
+        $txt = [System.Windows.Controls.TextBlock]::new()
+        $txt.Text = [string]$q.text; $txt.Foreground = $T.fg; $txt.FontSize = (FSz 12)
+        $txt.TextWrapping = 'Wrap'; $txt.VerticalAlignment = 'Center'
+        $row.Children.Add($txt) | Out-Null          # último = preenche o resto
+        $box.Children.Add($row) | Out-Null
+        $fnames = @($q.items | Where-Object { $_.Kind -ne 'img' } | ForEach-Object { [string]$_.Name })
+        if ($fnames.Count -gt 0) {
+            $at = [System.Windows.Controls.TextBlock]::new()
+            $at.Text = "📎 " + ($fnames -join ', '); $at.Foreground = $T.dim; $at.FontSize = (FSz 10)
+            $at.TextWrapping = 'Wrap'; $at.Margin = '0,2,0,0'
+            $box.Children.Add($at) | Out-Null
+        }
+        $card.Child = $box
+        $QueuePanel.Children.Add($card) | Out-Null
+    }
 }
 
 $textExts = @('.txt','.md','.csv','.tsv','.json','.xml','.log','.ps1','.psm1','.psd1','.py','.js','.ts','.cs','.cpp','.c','.h','.hpp','.java','.rb','.go','.rs','.php','.html','.htm','.css','.scss','.sh','.bat','.cmd','.ini','.cfg','.conf','.yml','.yaml','.sql','.env','.srt','.tex')
@@ -3167,6 +3286,13 @@ function Send-Current {
         Log 'uitest: plan'
         return
     }
+    if ($text -eq '/uitest plantext') {
+        # v3.21: barra de plano no modo TEXTUAL (plano escrito na resposta, turno já fechado)
+        $InputBox.Clear()
+        Show-TextPlanBar @{ title = 'Plano textual (uitest)'; steps = @('passo um de teste', 'passo dois de teste', 'passo três de teste') }
+        Log 'uitest: plantext'
+        return
+    }
     if ($text -eq '/uitest at') {
         # hook E2E do dialogo de mencao: chars INJETADOS nao viram texto nesta
         # sessao (TSF descarta input injetado — so' keydown puro chega), então
@@ -3186,15 +3312,20 @@ function Send-Current {
     }
     if (-not $text -and $imgs.Count -eq 0 -and $txtFiles.Count -eq 0 -and $pdfs.Count -eq 0) { return }
     if ($script:busy) {
-        # fila: Enter durante a resposta guarda a mensagem (textos/arquivos, nao imagem)
-        # e envia sozinho quando o turno acaba — a UI nao fica bloqueada
+        # fila v3.21: Enter durante a resposta guarda a mensagem no cartão "✉ na
+        # fila" (textos/arquivos, não imagem) — visível, ✎ edita, ✕ descarta;
+        # cada uma envia sozinha no fim do turno, na ordem em que entrou
         $hasImg = @($script:attachments | Where-Object { $_.Kind -eq 'img' }).Count -gt 0
         if ($hasImg) { $StatusText.Text = 'imagem não entra na fila — aguarde ou use ⏹ Parar'; return }
-        $script:queued = @{ text = $text; items = @($script:attachments) }
+        $entry = @{ text = $text; items = @($script:attachments) }
+        $script:queuedMsgs = @(@($script:queuedMsgs) + $entry)
         $InputBox.Clear()
         $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
-        $StatusText.Text = '✉ na fila — envia sozinho quando a resposta acabar'
-        Log ('fila: +1 mensagem (' + $text.Length + ' chars)')
+        Update-QueueBar
+        $n = @($script:queuedMsgs).Count
+        $StatusText.Text = if ($n -gt 1) { "✉ $n na fila — ✎ edita ou ✕ descarta no cartão acima" }
+                           else { '✉ na fila — ✎ edita ou ✕ descarta no cartão acima' }
+        Log ("fila: +1 mensagem ({0} chars, {1} na fila)" -f $text.Length, $n)
         return
     }
 
@@ -3212,6 +3343,7 @@ function Send-Current {
     $AnswerDoc.Blocks.Add($a.Section) | Out-Null
     $script:livePanel = $inner.Blocks
     $script:curAnswer = ''; $script:pendSources = @()
+    $script:lastLive = [datetime]::MinValue   # v3.21: 1º delta do turno renderiza na hora
 
     $InputBox.Clear()
     $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
@@ -3231,7 +3363,10 @@ function Send-Current {
     $script:curQuestion = $text
     # system prompt = base + memoria (lida a CADA envio: fato salvo nesta conversa ja
     # vale para o proximo envio, e o arquvivo e' editavel a mao)
-    $script:engine.Ask($text, $imgs, $txtFiles, $pdfs, ($sysPrompt + (Get-MemoryBlock) + (Get-SkillsBlock)))
+    $script:planGateSeen = $false                       # v3.21: novo turno, novo gate
+    if ($script:planMode -eq 'text' -and $PlanBar.Visibility -eq 'Visible') { Hide-PlanBar; $script:planMode = 'gate'; Log 'plano-texto: dispensado (novo envio)' }
+    $planOk = $script:pendingPlanOk; $script:pendingPlanOk = $false   # plano textual aprovado?
+    $script:engine.Ask($text, $imgs, $txtFiles, $pdfs, ($sysPrompt + (Get-MemoryBlock) + (Get-SkillsBlock)), $planOk)
 }
 
 function New-Conversation {
@@ -3244,7 +3379,9 @@ function New-Conversation {
     $script:curAnswer = ''; $script:lastAnswer = ''; $script:pendSources = @(); $script:livePanel = $null
     $script:convFile = $null
     $script:convResumed = $false
-    $script:queued = $null
+    $script:queuedMsgs = @()
+    Update-QueueBar
+    $script:planMode = 'gate'; $script:pendingPlanOk = $false
     $AnswerDoc.Blocks.Clear()
     $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
     $ConfirmBar.Visibility = 'Collapsed'
@@ -4499,13 +4636,13 @@ $timer.Add_Tick({
     $m = $null
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
-            'delta'   { $script:curAnswer += $m.Text; Update-LiveAnswer }
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|🧹|pass:') { Log ('tool: ' + $m.Text) } }
+            'delta'   { $script:curAnswer += $m.Text; $script:liveDirty = $true }   # render no throttle abaixo
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|🧹|pass:|✅') { Log ('tool: ' + $m.Text) } }   # v3.21: ✅ = isenções (plano/sempre permitido) no log
             'sources' { Show-Sources $m.Text }
             'plan' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
                 if ($c -and $c.hide) { Hide-PlanBar }
-                elseif ($c) { Show-PlanBar $c }
+                elseif ($c) { $script:planGateSeen = $true; Show-PlanBar $c }
             }
             'confirm' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("confirm-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
@@ -4578,6 +4715,13 @@ $timer.Add_Tick({
         }
         $m = $null
     }
+    # v3.21: render throttled — reparsear o markdown inteiro a cada delta congelava
+    # a UI em respostas longas (o Enter de enfileirar se perdia). Agora: delta só
+    # marca sujo; render no máx 1x/400ms. O render final é do Finish-Turn ('done').
+    if ($script:liveDirty -and ((Get-Date) - $script:lastLive).TotalMilliseconds -ge 400) {
+        $script:liveDirty = $false; $script:lastLive = Get-Date
+        Update-LiveAnswer
+    }
 })
 
 # ---------- janela: mostrar/ocultar/centro ----------
@@ -4600,7 +4744,9 @@ function Reset-Conversation {
     if ($script:busy) { return }
     if ($script:engine) { $script:engine.Reset() }
     $script:stopped = $false
-    $script:queued = $null
+    $script:queuedMsgs = @()
+    Update-QueueBar
+    $script:planMode = 'gate'; $script:pendingPlanOk = $false
     $script:curAnswer = ''; $script:lastAnswer = ''; $script:pendSources = @(); $script:livePanel = $null
     $script:convFile = $null; $script:convResumed = $false
     $AnswerDoc.Blocks.Clear()
@@ -4715,6 +4861,7 @@ $ConfirmAlwaysBtn.Add_Click({
 $script:planId = 0
 
 function Show-PlanBar($c) {
+    $script:planMode = 'gate'
     $script:planId = [int]$c.id
     $PlanTitle.Text = [string]$c.title
     $PlanSteps.Children.Clear()
@@ -4749,15 +4896,77 @@ function Show-PlanBar($c) {
 
 function Hide-PlanBar { $PlanBar.Visibility = 'Collapsed' }
 
+# v3.21: heurística de plano TEXTUAL — o modelo às vezes escreve o plano como
+# resposta final em vez de chamar a tool plan; o turno fecha "mudo" (como se a
+# tarefa tivesse terminado) e não há botão para aprovar. Detecta: lista numerada
+# de 2-12 itens começando em 1-3, resposta curta, E (palavra-chave OU metade dos
+# passos com verbo de ação — o modelo responde só "1. Criar... 2. Criar..." sem
+# dizer "plano" em lugar nenhum).
+function Test-TextPlan([string]$text) {
+    if ([string]::IsNullOrWhiteSpace($text) -or $text.Length -gt 4000) { return $null }
+    $ms = [regex]::Matches($text, '(?m)^\s*(\d{1,2})[.)\-]\s+(\S.*)$')
+    if ($ms.Count -lt 2 -or $ms.Count -gt 12) { return $null }
+    $nums = @($ms | ForEach-Object { [int]$_.Groups[1].Value })
+    if ($nums[0] -gt 3) { return $null }   # lista de fatos solta ("7. ..." no meio) não é plano
+    $steps = @($ms | ForEach-Object { (($_.Groups[2].Value -replace '[*`]', '')).Trim() } | Select-Object -First 8)
+    $hasKw = $text -match '(?i)\bplano\b|\bpassos?\b|\betapas?\b|\bsteps?\b'
+    $verbHits = @($steps | Where-Object { $_ -match '(?i)\b(cri|edit|mov|apag|delet|remov|renome|instal|abri|abre|execut|rod|grav|escrev|salv|baix|copi|configur|mont|descompact|extrai|create|write|move|delete|remove|rename|install|open|run|save|download|copy|mkdir)' }).Count
+    if (-not $hasKw -and $verbHits -lt [Math]::Ceiling($steps.Count / 2.0)) { return $null }
+    $title = (($text -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1) -replace '[#*`]', '').Trim()
+    if ($title.Length -gt 100) { $title = $title.Substring(0, 100) }
+    # resposta que JÁ É só a lista: título vira header genérico (1º passo não é título)
+    if ($title -match '^\d{1,2}[.)\-]') { $title = 'Plano proposto na resposta' }
+    @{ title = $title; steps = $steps }
+}
+
+# v3.21: mesma barra do plano, modo texto — o plano já está no card da resposta
+# (não ecoa outro card); aprovar envia a execução já isenta (pendingPlanOk).
+function Show-TextPlanBar($p) {
+    $script:planMode = 'text'
+    $script:planId = 0
+    $PlanTitle.Text = [string]$p.title
+    $PlanSteps.Children.Clear()
+    $i = 0
+    foreach ($s in @($p.steps)) {
+        $i++
+        $tb = [System.Windows.Controls.TextBlock]::new()
+        $tb.FontFamily = [System.Windows.Media.FontFamily]::new('Cascadia Mono, Consolas')
+        $tb.FontSize = (FSz 11); $tb.TextWrapping = 'Wrap'
+        $tb.Text = "$i. $([string]$s)"
+        $tb.Foreground = $(if ($i % 2 -eq 0) { $T.status } else { $T.fg })
+        $null = $PlanSteps.Children.Add($tb)
+    }
+    $PlanBar.Visibility = 'Visible'
+    if (-not $window.IsVisible) { if ($cfg.window.center) { Center-Window }; $window.Show() }
+    [void]$window.Activate()
+    [void]$PlanYes.Focus()
+    $StatusText.Text = '🧭 plano na resposta — ✅ aprova e executa em lote'
+    Log ('plano-texto: botão de aprovação oferecido (' + @($p.steps).Count + ' passos)')
+}
+
 $PlanYes.Add_Click({
-    if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $true) }
-    Hide-PlanBar; $StatusText.Text = '✅ plano aprovado — executando sem confirmações…'
-    Log 'plano: aprovado'
+    if ($script:planMode -eq 'text') {
+        Hide-PlanBar; $script:planMode = 'gate'
+        $script:pendingPlanOk = $true
+        $InputBox.Text = '✅ PLANO APROVADO — execute agora os passos do plano que você apresentou, em ordem, SEM pedir confirmação individual (o lote já foi aprovado). Ao final, entregue um resumo curto do que fez.'
+        Log 'plano-texto: aprovado — executando'
+        Send-Current
+    } else {
+        if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $true) }
+        Hide-PlanBar; $StatusText.Text = '✅ plano aprovado — executando sem confirmações…'
+        Log 'plano: aprovado'
+    }
 })
 $PlanNo.Add_Click({
-    if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $false) }
-    Hide-PlanBar; $StatusText.Text = 'plano rejeitado'
-    Log 'plano: rejeitado'
+    if ($script:planMode -eq 'text') {
+        Hide-PlanBar; $script:planMode = 'gate'
+        $StatusText.Text = 'plano dispensado'
+        Log 'plano-texto: dispensado'
+    } else {
+        if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $false) }
+        Hide-PlanBar; $StatusText.Text = 'plano rejeitado'
+        Log 'plano: rejeitado'
+    }
 })
 
 # ---------- ask_user: painel de decisao multipla-escolha (estilo Claude Code) ----------
@@ -5106,7 +5315,10 @@ $window.Add_Drop({
 # e esconde a janela. Alt+Q continua sendo so' mostrar/ocultar.
 # Excecao: com pergunta aberta, Esc so' cancela a pergunta (o modelo segue).
 $window.Add_PreviewKeyUp({ param($s, $e) if ($e.Key -eq 'Escape') {
-    if ($PlanBar.Visibility -eq 'Visible') { Log 'esc: plano rejeitado'; if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $false) }; Hide-PlanBar; $StatusText.Text = 'plano rejeitado' }
+    if ($PlanBar.Visibility -eq 'Visible') {
+        if ($script:planMode -eq 'text') { Log 'esc: plano-texto dispensado'; Hide-PlanBar; $script:planMode = 'gate'; $StatusText.Text = 'plano dispensado' }
+        else { Log 'esc: plano rejeitado'; if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $false) }; Hide-PlanBar; $StatusText.Text = 'plano rejeitado' }
+    }
     elseif ($AskBar.Visibility -eq 'Visible') { Log 'esc: pergunta cancelada'; Send-AskAnswer $null }
     else { Log 'esc: conversa fechada'; New-Conversation; $window.Hide() }
     $e.Handled = $true
