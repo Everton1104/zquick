@@ -5,7 +5,7 @@
 #   Atalho global (default Win+C) mostra/oculta. Enter envia, Shift+Enter quebra linha,
 #   Ctrl+V cola texto OU imagem (print), Esc oculta.
 #   Perfis em zquick.json -> qualquer LLM com endpoint compativel com a API Anthropic.
-param([switch]$Hidden)
+param([switch]$Hidden, [switch]$Setup)   # -Setup: abre o assistente mesmo já configurado (instalador)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.23.1'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.24.0'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -6166,6 +6166,71 @@ function Update-ZQ($u) {
     [Environment]::Exit(0)
 }
 
+# ---------- v3.24: provedores do wizard (nuvem nativa Anthropic + LLM local) ----------
+# local = Ollama/LM Studio/llama.cpp com API compatível Anthropic (/v1/messages);
+# precisam estar RODANDO no momento do teste e a chave é opcional (não validam).
+$script:wzProviders = [ordered]@{
+    zai      = @{ label = 'Z.ai';      base = 'https://api.z.ai/api/anthropic';     prof = 'zai' }
+    kimi     = @{ label = 'Kimi';      base = 'https://api.moonshot.cn/anthropic';  prof = 'kimi' }
+    deepseek = @{ label = 'DeepSeek';  base = 'https://api.deepseek.com/anthropic'; prof = 'deepseek' }
+    ollama   = @{ label = 'Ollama';    base = 'http://localhost:11434'; prof = 'local'; local = $true }
+    lmstudio = @{ label = 'LM Studio'; base = 'http://localhost:1234';  prof = 'local'; local = $true }
+    llama    = @{ label = 'llama.cpp'; base = 'http://localhost:8080';  prof = 'local'; local = $true }
+}
+$script:wzBtnName = @{ zai = 'WzPrZai'; kimi = 'WzPrKimi'; deepseek = 'WzPrDeepseek'
+                      ollama = 'WzPrOllama'; lmstudio = 'WzPrLmstudio'; llama = 'WzPrLlama'; outro = 'WzPrOutro' }
+function Wz-IsLocalBase([string]$u) { $u -match '(?i)://(localhost|127\.|\[::1\])' }
+# botão de preset: preenche a URL, ajusta os rótulos e desmarca o teste anterior
+# ($null = nenhum marcado; mantém a URL que veio do perfil)
+function Wz-PickProvider([string]$k) {
+    $g = $script:wzG; $st = $script:wzSt
+    $st.provider = $k; $st.local = $false
+    if ($k -and $k -ne 'outro' -and $script:wzProviders.Contains($k)) {
+        $st.local = [bool]$script:wzProviders[$k].local
+        $g['WzUrl'].Text = $script:wzProviders[$k].base
+        $g['WzKeyLabel'].Text = $(if ($st.local) { 'Chave da API (opcional p/ servidor local — vazio = manter):' }
+                                   else { 'Chave da API (vazio = manter a atual):' })
+        $g['WzConn'].Text = $(if ($st.local) {
+            'Servidor local: deixe o programa RODANDO (Ollama/LM Studio/llama.cpp aceitam o padrão Anthropic). Teste a conexão para avançar.'
+        } elseif ($k -eq 'zai') {
+            'Z.ai: a chave sai de z.ai (API Keys). Teste a conexão para avançar.'
+        } else {
+            'Cole a chave do provedor e teste a conexão para avançar.'
+        })
+    }
+    # trocou de provedor = os modelos medidos da conexão anterior não valem mais
+    $st.ok = $false; $st.ids = @(); $st.times = $false; $st.fast = $null; $st.big = $null; $st.vision = $null
+    try { $g['WzBenchList'].ItemsSource = $null; $g['WzRec'].Text = ''; $g['WzBenchStatus'].Text = 'aguardando…' } catch {}
+    foreach ($n in @($script:wzBtnName.Keys)) {
+        $b = $g[$script:wzBtnName[$n]]
+        if ($n -eq $k) { $b.Background = $T.accent; $b.Foreground = (Get-ContrastFgHex $T.accent) }
+        else           { $b.Background = $T.panel;  $b.Foreground = $T.fg }
+    }
+}
+# nome do perfil onde o Concluir grava: LLM local ganha perfil próprio ('local',
+# não estraga o de nuvem); provedor conhecido usa/cria o perfil dele — mas só
+# quando a URL de destino DIFERE da atual (voltar a testar o mesmo base não troca)
+function Wz-TargetProfileName {
+    $g = $script:wzG
+    $base = (([string]$g['WzUrl'].Text).Trim()).TrimEnd('/')
+    $cur = [string]$cfg.profile
+    $curBase = (([string](Get-CfgProp (Get-ActiveProfile) 'baseUrl')).Trim()).TrimEnd('/')
+    if ($base -eq $curBase) { return $cur }
+    $target = $null
+    if (Wz-IsLocalBase $base) { $target = 'local' }
+    else {
+        foreach ($k in @($script:wzProviders.Keys)) {
+            if (-not $script:wzProviders[$k].local -and $base -eq ([string]$script:wzProviders[$k].base) ) { $target = $script:wzProviders[$k].prof; break }
+        }
+    }
+    if (-not $target -or $target -eq $cur) { return $cur }
+    if ((Get-ProfileNames) -notcontains $target) {
+        $lbl = $(if ($target -eq 'local') { 'LLM local' } else { $script:wzProviders[$target].label })
+        Set-CfgProp $cfg.profiles $target ([pscustomobject]@{ label = $lbl })
+    }
+    $target
+}
+
 # auth das caixas do wizard: URL da caixa; chave da caixa ou a atual do perfil/ambiente
 function Wz-Auth {
     $g = $script:wzG
@@ -6173,7 +6238,8 @@ function Wz-Auth {
     if (-not $base) { $base = 'https://api.z.ai/api/anthropic' }
     $key = ([string]$g['WzKey'].Password).Trim()
     if (-not $key) {
-        try { $key = (Resolve-ProfileAuth (Get-ActiveProfile)).key } catch { throw 'digite a chave da API' }
+        if (Wz-IsLocalBase $base) { $key = 'local' }   # servidor local não valida a chave
+        else { try { $key = (Resolve-ProfileAuth (Get-ActiveProfile)).key } catch { throw 'digite a chave da API' } }
     }
     @{ base = $base; key = $key }
 }
@@ -6189,7 +6255,8 @@ function Wz-TestConn {
         $ids = @($r.data | ForEach-Object { [string]$_.id } | Where-Object { $_ })
         if (-not $ids.Count) { throw 'a API respondeu sem lista de modelos' }
         $st.ids = $ids; $st.ok = $true
-        $g['WzConn'].Text = ('✔ conectado — {0} modelos disponíveis. Avance para medir a velocidade de cada um.' -f $ids.Count)
+        $sample = (@($ids | Select-Object -First 3) -join ', ') + $(if ($ids.Count -gt 3) { '…' } else { '' })
+        $g['WzConn'].Text = ('✔ conectado — {0} modelo(s) disponível(is): {1}. Avance para medir a velocidade de cada um.' -f $ids.Count, $sample)
         Log ('wizard: conexao ok (' + $ids.Count + ' modelos em ' + $auth.base + ')')
     } catch {
         $st.ok = $false; $st.ids = @()
@@ -6319,7 +6386,7 @@ function Wz-Summary {
     $big  = $(if ($st.big)    { [string]$st.big }    else { [string](Get-CfgProp $p 'bigModel') })
     $vis  = $(if ($st.vision) { [string]$st.vision } else { [string](Get-CfgProp $p 'visionModel') })
     (@(
-        ('perfil: {0} — {1}' -f [string]$cfg.profile, ([string]$g['WzUrl'].Text).Trim()),
+        ('perfil: {0} — {1}' -f (Wz-TargetProfileName), ([string]$g['WzUrl'].Text).Trim()),
         ('  rápido (simples): {0}' -f $(if ($fast) { $fast } else { '—' })),
         ('  forte  (complexo): {0}' -f $(if ($big) { $big } else { '—' })),
         ('  visão  (prints): {0}' -f $(if ($vis) { $vis } else { '—' })),
@@ -6334,12 +6401,15 @@ function Wz-Finish {
     $g = $script:wzG; $st = $script:wzSt
     try {
         $g['WzFinish'].IsEnabled = $false
-        # perfil: url/chave/lista/recomendacoes
+        # perfil: url/chave/lista/recomendacoes (LLM local grava no perfil 'local')
+        $pn = Wz-TargetProfileName
+        if ($pn -ne [string]$cfg.profile) { $cfg.profile = $pn; Log ('wizard: perfil de destino = ' + $pn) }
         $p = Get-ActiveProfile
         $nb = ([string]$g['WzUrl'].Text).Trim()
         if ($nb) { Set-CfgProp $p 'baseUrl' $nb }
         $nk = ([string]$g['WzKey'].Password).Trim()
         if ($nk) { Set-CfgProp $p 'apiKey' $nk }
+        elseif (Wz-IsLocalBase $nb) { Set-CfgProp $p 'apiKey' 'local' }   # perfil local novo precisa de algo em apiKey (gate da 1ª execução)
         if ($st.ids -and @($st.ids).Count -gt 0) { Set-CfgProp $p 'models' (@('auto') + @($st.ids)) }
         if ($st.fast)   { Set-CfgProp $p 'fastModel'   ([string]$st.fast) }
         if ($st.big)    { Set-CfgProp $p 'bigModel'    ([string]$st.big) }
@@ -6529,13 +6599,23 @@ function Show-SetupWizard([bool]$first) {
       <StackPanel x:Name="WzP1">
         <TextBlock Foreground="#E8E8EC" TextWrapping="Wrap"
                    Text="Configuramos o ZQuick em 4 etapas: conexão, velocidade dos modelos, preferências e revisão." Margin="0,0,0,10"/>
+        <TextBlock Foreground="#9A9AA5" Text="Onde está o seu LLM?" Margin="0,0,0,4"/>
+        <WrapPanel Margin="0,0,0,8">
+          <Button x:Name="WzPrZai" Content="Z.ai" FontSize="11" Padding="10,4" Margin="0,0,6,6"/>
+          <Button x:Name="WzPrKimi" Content="Kimi" FontSize="11" Padding="10,4" Margin="0,0,6,6"/>
+          <Button x:Name="WzPrDeepseek" Content="DeepSeek" FontSize="11" Padding="10,4" Margin="0,0,6,6"/>
+          <Button x:Name="WzPrOllama" Content="🖥 Ollama" FontSize="11" Padding="10,4" Margin="0,0,6,6"/>
+          <Button x:Name="WzPrLmstudio" Content="🖥 LM Studio" FontSize="11" Padding="10,4" Margin="0,0,6,6"/>
+          <Button x:Name="WzPrLlama" Content="🖥 llama.cpp" FontSize="11" Padding="10,4" Margin="0,0,6,6"/>
+          <Button x:Name="WzPrOutro" Content="✎ outra…" FontSize="11" Padding="10,4" Margin="0,0,0,6"/>
+        </WrapPanel>
         <TextBlock Foreground="#9A9AA5" Text="Endereço da API (padrão Anthropic — /v1/messages):" Margin="0,0,0,4"/>
         <TextBox x:Name="WzUrl"/>
-        <TextBlock Foreground="#9A9AA5" Text="Chave da API (vazio = manter a atual):" Margin="0,10,0,4"/>
+        <TextBlock x:Name="WzKeyLabel" Foreground="#9A9AA5" Text="Chave da API (vazio = manter a atual):" Margin="0,10,0,4"/>
         <PasswordBox x:Name="WzKey"/>
         <Button x:Name="WzTest" Content="🔌 Testar conexão" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,12,0,0"/>
         <TextBlock x:Name="WzConn" Foreground="#9A9AA5" TextWrapping="Wrap" Margin="0,10,0,0"
-                   Text="Z.ai: a chave sai de z.ai (API Keys). Teste a conexão para avançar."/>
+                   Text="Escolha o provedor acima, cole a chave e teste a conexão para avançar. Z.ai: a chave sai de z.ai (API Keys). LLM local (Ollama/LM Studio): deixe o servidor rodando."/>
       </StackPanel>
       <StackPanel x:Name="WzP2" Visibility="Collapsed">
         <TextBlock Foreground="#E8E8EC" TextWrapping="Wrap"
@@ -6578,6 +6658,7 @@ function Show-SetupWizard([bool]$first) {
         $wz = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($wx))
         $g = @{}
         foreach ($n in 'WzClose','WzStep','WzP1','WzP2','WzP3','WzP4','WzUrl','WzKey','WzTest','WzConn',
+                       'WzPrZai','WzPrKimi','WzPrDeepseek','WzPrOllama','WzPrLmstudio','WzPrLlama','WzPrOutro','WzKeyLabel',
                        'WzBench','WzBenchStatus','WzBenchList','WzRec','WzAuto','WzHkCur','WzHkCtrl','WzHkAlt',
                        'WzHkShift','WzHkKey','WzHkTest','WzHkStatus','WzCenter','WzModelAuto','WzSum',
                        'WzBack','WzNext','WzFinish') {
@@ -6599,8 +6680,22 @@ function Show-SetupWizard([bool]$first) {
         if ($kk) { $g['WzHkKey'].Text = $kk.ToUpper() }
         $g['WzCenter'].IsChecked = [bool]$cfg.window.center
         $g['WzModelAuto'].IsChecked = (([string]$cfg.model) -eq 'auto')
+        # v3.24: marca o preset que casa com a base atual (ou nenhum — URL editada/outra)
+        $curBase = (([string]$g['WzUrl'].Text).Trim()).TrimEnd('/')
+        $pick = $null
+        foreach ($k in @($script:wzProviders.Keys)) {
+            if ($curBase -eq ([string]$script:wzProviders[$k].base).TrimEnd('/')) { $pick = $k; break }
+        }
+        Wz-PickProvider $pick
         # ---- eventos ----
         $g['WzClose'].Add_Click({ try { $script:wzWin.DialogResult = $false } catch { try { $script:wzWin.Close() } catch {} } })
+        $g['WzPrZai'].Add_Click({ Wz-PickProvider 'zai' })
+        $g['WzPrKimi'].Add_Click({ Wz-PickProvider 'kimi' })
+        $g['WzPrDeepseek'].Add_Click({ Wz-PickProvider 'deepseek' })
+        $g['WzPrOllama'].Add_Click({ Wz-PickProvider 'ollama' })
+        $g['WzPrLmstudio'].Add_Click({ Wz-PickProvider 'lmstudio' })
+        $g['WzPrLlama'].Add_Click({ Wz-PickProvider 'llama' })
+        $g['WzPrOutro'].Add_Click({ Wz-PickProvider 'outro' })
         $g['WzTest'].Add_Click({ Wz-TestConn })
         $g['WzBench'].Add_Click({ Wz-Bench })
         $g['WzHkTest'].Add_Click({ Wz-HkTest })
@@ -6649,9 +6744,14 @@ $updTimer.Start()
 # (assim que a janela pinta; instalador nao precisa mais abrir o json no Bloco de Notas)
 $window.Add_ContentRendered({
     if ($Hidden) { return }
-    try { $null = Resolve-ProfileAuth (Get-ActiveProfile); return } catch {}
-    Log 'assistente: sem chave configurada — abrindo na 1ª execução'
-    try { Show-SetupWizard $false } catch { Log "wizard(1ª vez): $_" }
+    $semChave = $false
+    try { $null = Resolve-ProfileAuth (Get-ActiveProfile) } catch { $semChave = $true }
+    if ($semChave) {
+        Log 'assistente: sem chave configurada — abrindo na 1ª execução'
+        try { Show-SetupWizard $false } catch { Log "wizard(1ª vez): $_" }
+    } elseif ($Setup) {   # v3.24: -Setup abre o assistente mesmo já configurado (instalador)
+        try { Show-SetupWizard $true } catch { Log "wizard(-setup): $_" }
+    }
 })
 # v3.20: a partir daqui move/resize = usuário (ver handler de LocationChanged)
 $window.Add_ContentRendered({ $script:winReady = $true })

@@ -1,322 +1,74 @@
 ═══════════════════════════════════════════════════════════════════
  ZQuick — busca rápida com LLM, sempre à mão (estilo Copilot)
 ═══════════════════════════════════════════════════════════════════
+ Janela compacta residente na bandeja: aperte Alt+Q, digite a
+ pergunta (ou cole um print / PDF / documento com Ctrl+V) e receba
+ a resposta em streaming, com busca na web, leitura de imagens e
+ arquivos — e um agente que executa tarefas no Windows.
+ Sem geração de imagem. Requisitos: NENHUM (usa o PowerShell
+ nativo; exe de ~240 KB, não instala nada).
 
-O QUE É
-  Janela compacta residente na bandeja: aperte Alt+Q, digite a pergunta
-  (ou cole um print / PDF / documento com Ctrl+V) e receba a resposta em
-  streaming, com busca na web, leitura de imagens e arquivos — e um
-  agente que executa tarefas no Windows. Sem geração de imagem.
+ >> Detalhes (agente Windows, MCP, skills, compactação, temas,
+    config avançada, LLM local): veja o MANUAL.txt deste kit.
 
-  • Motor: API compatível com Anthropic (Z.ai GLM por padrão; aceita
-    outros provedores — ver CHAVES DE OUTRAS LLMs abaixo).
-  • Modo "auto": pergunta simples → modelo flash (rápido); pergunta
-    complexa → encaminha ao modelo grande sozinho; imagem anexada em
-    modo auto → vai ao "visionModel" (o glm-5.3 grande NÃO aceita
-    imagem — na Z.ai quem lê print é o flash); pergunta com cara de
-    fato atual ("hoje", "cotação", "versão", "placar"...) → busca
-    disparada em paralelo + modelo forte na hora (~8s).
-  • Busca: searchEngine "bing" = cadeia cliente (Bing RSS → Bing HTML →
-    web-search da Z.ai); "zai-server" = busca roda NO SERVIDOR da Z.ai
-    (web_search integrado ao /v1/messages — melhor qualidade e filtro
-    de data automático; rejeitado, cai pro Bing sozinho). Fontes
-    clicáveis [1] [2].
-  • Requisitos: NENHUM. Usa o PowerShell nativo do Windows (.exe de
-    ~240 KB, não instala nada).
+INSTALAÇÃO
+  MSI (recomendado): dois cliques em ZQuick-x.y.z.msi. Instala por
+  USUÁRIO — não pede administrador — em %LOCALAPPDATA%\Programs\
+  ZQuick, com atalho no Menu Iniciar e pergunta se já abre o
+  assistente. (SmartScreen: "Mais informações" → "Executar assim
+  mesmo" — binário sem assinatura digital.)
+  Ou por pasta: copie a pasta do kit e dê dois cliques em
+  INSTALAR.cmd (mesmo destino, sem atalho no Menu Iniciar).
 
-INSTALAÇÃO (em outro PC)
-  Jeito 1 — MSI (recomendado): dois cliques em ZQuick-x.y.z.msi (na pasta
-  do kit ou nos releases do GitHub). Instala por USUÁRIO — não pede
-  administrador — em %LOCALAPPDATA%\Programs\ZQuick, com atalho no Menu
-  Iniciar. (SmartScreen: "Mais informações" → "Executar assim mesmo" —
-  binário sem assinatura digital.)
-  Jeito 2 — pasta: copie a pasta Kit-ZQuick inteira e dê dois cliques
-  em INSTALAR.cmd (mesmo destino, sem atalho no Menu Iniciar).
-
-  Na primeira execução o ASSISTENTE DE CONFIGURAÇÃO abre sozinho:
-  1. Cole a chave da API (Z.ai: z.ai → API Keys) e teste a conexão;
-  2. Ele mede o tempo de resposta de CADA modelo e monta a lista
-     ordenada + a recomendação ⚡ rápido / 🧠 forte / 👁 visão;
-  3. Escolha se o ZQuick inicia com o Windows e confira o atalho
-     Alt+Q (dá para trocar e testar outra combinação ali mesmo);
-  4. Concluir salva tudo. Pronto — Alt+Q.
+PRIMEIRO USO — o assistente abre sozinho
+  1. CONEXÃO: escolha o provedor (Z.ai, Kimi, DeepSeek — ou um LLM
+     LOCAL: 🖥 Ollama / 🖥 LM Studio / 🖥 llama.cpp com o servidor
+     rodando), cole a chave da API (Z.ai: z.ai → API Keys; local
+     não precisa) e clique em "🔌 Testar conexão" — ele lista os
+     modelos disponíveis;
+  2. VELOCIDADE: ele mede o tempo de resposta de cada modelo e
+     monta a lista ordenada + a recomendação ⚡ rápido / 🧠 forte /
+     👁 visão;
+  3. PREFERÊNCIAS: iniciar com o Windows e o atalho de abrir
+     (padrão Alt+Q — dá para trocar e testar ali mesmo);
+  4. CONCLUIR salva tudo. Pronto — Alt+Q.
+  LLM local é gravado num perfil próprio ("local"); o de nuvem
+  continua intacto — troque entre eles na caixa de perfil do topo.
   Reabrir o assistente depois: botão 🧙 no ⚙ ou menu do ícone Z.
 
+O ESSENCIAL DO TECLADO
+  Alt+Q ....... mostra/oculta a janela
+  Enter ....... envia  |  Shift+Enter ... quebra linha
+  Ctrl+V ...... cola texto, print OU ARQUIVO (vira anexo)
+  @ ........... no começo de palavra abre o seletor de arquivos
+  Esc ......... fecha a conversa (app segue na bandeja)
+  Ctrl+N ...... nova conversa
+  ⏹ ........... durante a resposta: Parar (o que chegou fica)
+  ✉ ........... digitar durante a resposta ENFILEIRA a mensagem
+  🕘 ........... histórico — duplo clique retoma a conversa antiga
+                (com imagens e anexos) do ponto onde parou
+  ⚙ ........... configurações: perfil/chave/modelos, janela,
+                aparência (15 cores do tema), geral
+  📌 ........... sempre no topo  |  Ctrl+roda ... opacidade (40-100%)
+  ⧉ ........... canto do card de resposta: copia AQUELA resposta
+  — ▢ ✕ ........ ocultar p/ bandeja / maximizar / ocultar (sair de
+                verdade é no menu do ícone Z da bandeja)
+
 ATUALIZAÇÃO AUTOMÁTICA
-  Uma vez por dia (ao abrir o app) o ZQuick consulta os releases do GitHub
-  (Everton1104/zquick). Saindo versão nova, aparece um balão — clique nele
-  (ou no menu do ícone Z → "Procurar atualizações") e confirme: ele baixa
-  o zquick.exe do release, troca o executável sozinho e REINICIA o app
-  (conversas e configurações ficam; o arquivo antigo vira zquick.exe.old
-  e é removido no boot seguinte). Para checar na hora: ⚙ → aba Geral →
-  "🔎 procurar agora". Dá para desligar a busca automática nesse mesmo
-  lugar. Instalou pelo MSI? O auto-update atualiza o exe do mesmo jeito —
-  ou, se preferir, baixe o ZQuick-x.y.z.msi novo e instale por cima.
-
-CHAVES DE OUTRAS LLMs (perfis)
-  Não precisa ser Claude: o ZQuick fala a API Anthropic (/v1/messages)
-  e qualquer provedor que exponha esse padrão serve — Z.ai (GLM),
-  Kimi/Moonshot, DeepSeek, MiniMax e Qwen falam-no de fábrica (para
-  Gemini/OpenAI/Mistral é preciso um gateway de tradução). Tudo fica
-  no zquick.json, seção "profiles" — cada perfil é um provedor. Já
-  vem com dois exemplos:
-
-    "zai"  → Z.ai (chave em https://z.ai)
-    "kimi" → Moonshot Kimi (chave em https://platform.moonshot.cn)
-
-  Para usar outro, copie um bloco, troque baseUrl/apiKey e liste os
-  modelos em "models" — ou aperte "🔎 listar da API" no ⚙: o app
-  consulta o provedor (GET /v1/models), preenche a caixa sozinho e
-  marca com ⭐ o recomendado (o maior modelo "cheio"; variantes
-  flash/turbo/air/mini/lite ficam fora da indicação — a estrela é
-  só visual, nunca vai para a API). "fastModel" = modelo veloz do
-  perfil; "bigModel" = modelo forte (usado pelo modo auto);
-  "visionModel" = modelo que aceita imagem, se o provedor tiver um
-  diferente. Depois é só escolher o perfil na primeira caixa do
-  topo da janela.
-
-USO
-  Alt+Q ....... mostra/oculta (registro sólido, funciona sempre);
-                REABRIR JÁ COMEÇA CONVERSA NOVA — para continuar
-                uma antiga, retome pelo 🕘
-  🕘 ........... histórico: cada pergunta enviada vira um item; abre
-                com o cursor na caixa de BUSCA (filtrar por pergunta
-                OU resposta — alguns termos já estreiam a lista);
-                duplo clique, Enter ou Retomar recarrega a conversa — com
-                as imagens — e você continua dali NO MESMO registro
-                (perguntas seguintes atualizam ele, não criam novo).
-                Salva sozinho em history\ ao lado do exe (guarda tudo,
-                inclusive prints; mantém os 200 mais recentes / ~50MB).
-  Enter ....... envia   |   Shift+Enter ... quebra linha
-  Ctrl+V ...... cola texto, print de tela OU ARQUIVO (vira anexo)
-  Arrastar .... solte arquivos na janela para anexar
-  Esc ......... FECHA a conversa: esconde a janela e zera o chat
-                (o rascunho não-enviado fica; app segue na bandeja)
-  Ctrl+N ...... nova conversa (o mesmo, sem esconder a janela)
-  @ ........... @ no começo de palavra abre o seletor de ARQUIVOS do
-                Windows: o caminho escolhido entra no texto e o modelo
-                lê o arquivo por conta própria. Cancelar deixa o @ cair
-                como texto comum (e-mails e @usuário não abrem nada).
-  ⏹ Parar ..... durante a resposta o botão Enviar vira "Parar": corta
-                na hora (o texto que já chegou fica no card).
-  ✉ ........... digitar durante a resposta ENFILEIRA a mensagem: ela
-                vai sozinha quando a resposta acabar.
-  ⚙ ........... CONFIGURAÇÕES sem mexer em arquivo: 4 abas (Perfil
-                & chaves / Janela / Aparência / Geral) cobrem chave de
-                API e modelos por perfil, tamanho e centralização da
-                janela, opacidade, fonte e tamanho do texto, as 15
-                cores do tema (incl. a barra de rolagem), o estilo
-                dela (fina arredondada / fina reta / clássica),
-                buscador, maxTokens, promptCache,
-                hideOnBlur e systemPrompt. Aplica na hora janela,
-                 opacidade, fonte e TODAS as cores (v3.23: repinta a
-                 janela inteira ao vivo — inclusive o ⚙ que está aberto
-                 e os cards da conversa); troca de chave/modelo recria
-                 o motor no próximo envio.
-  — ▢ ✕ ........ moldura própria (sem a barra do Windows): — e ✕
-                OCULTAM para a bandeja (não fecham o app — sair de
-                verdade é no menu do ícone Z); ▢ maximiza/restaura
-                (duplo clique no topo também). Arraste pelo topo;
-                bordas/redimensionamento continuam do Windows.
-  JANELA ....... o tamanho e a posição da janela são MEMORIZADOS —
-                arraste e redimensione à vontade, o próximo abrir
-                volta como você deixou (marque "centralizar" no ⚙
-                para abrir sempre no centro).
-  📌 ........... fixa a janela SEMPRE NO TOPO (por cima dos outros
-                programas): botão 📌 na barra de título (e no ⚙).
-  Ctrl+roda .... roda do mouse COM Ctrl sobre qualquer janela do app
-                ajusta a OPACIDADE ao vivo (40–100%). A transparência
-                é real: dá para ver a Área de Trabalho por trás.
-  Ícone Z na bandeja: duplo clique = mostrar; botão direito = Assistente
-  de configuração / Procurar atualizações / Sair.
-
-ANEXOS DE ARQUIVO
-  Cole com Ctrl+V (ou arraste): além de prints, o app aceita
-  • PDF (até 6 MB) — enviado inteiro; o modelo lê o documento
-  • DOCX — o texto é extraído na hora
-  • texto/código (txt, md, csv, json, xml, ps1, py, js, html, sql...)
-  Os anexos aparecem como fichas acima da caixa de digitação (✕ remove)
-  e fazem parte da conversa salva no histórico — retomar devolve
-  tudo ao modelo. Pergunte direto: "o que está escrito no arquivo
-  anexado?", "resuma o PDF", "traduza o documento"...
-
-AGENTE WINDOWS (tarefas no PC)
-  O ZQuick também AGE no seu Windows, com ferramentas dedicadas:
-  • file_list / file_read — listar pastas e ler arquivos (livre)
-  • file_grep — buscar DENTRO dos arquivos de uma pasta (recursivo;
-    acha onde um termo está definido/definido sem abrir arquivo
-    por arquivo)
-  • file_edit — edição cirúrgica (troca um trecho EXATO por outro,
-    com diff vermelho/verde para aprovar; backup .zquick.bak)
-  • file_write / file_move / file_delete — criar, renomear, mover;
-    apagar vai SEMPRE para a Lixeira
-  • note_add — grava notas em Documentos\ZQuick-Notas (markdown)
-  • memory_save — grava fatos DURÁVEIS sobre você/suas máquinas/
-    preferências que valem para TODAS as conversas futuras
-  • run_ps — executa QUALQUER comando PowerShell numa SESSÃO
-    PERSISTENTE por conversa: pasta atual, variáveis e funções
-    criadas numa chamada existem na seguinte (abrir programas,
-    mexer em configurações, processos, verificações...)
-  Toda ação que altera algo aparece na janela para você autorizar:
-  uma barra com ✅ Executar / ✔ Sempre (gravar exceção e não
-  perguntar mais para isto) / ✕ Negar (expira sozinha em 45s).
-  PLANO: para tarefas com 3+ ações, o assistente propõe um PLANO
-  (título + passos) e você aprova UMA vez — tudo roda sem pedir
-  confirmação individual. Rejeitar = nada executa.
-  PERGUNTAS: quando a decisão é sua (qual abordagem, qual arquivo,
-  escopo...), ele pergunta na própria janela com opções prontas —
-  uma ou várias perguntas de uma vez, múltipla escolha ou texto
-  livre, com preview lado a lado quando compara código/mockup.
-  PARALELO: chamadas de LEITURA pedidas juntas (buscar, listar,
-  ler, grep) rodam em paralelo — duas buscas ou buscar+ler no
-  mesmo turno leva o tempo de uma só.
-  MCP: o ZQuick é cliente MCP — cadastre servidores stdio em
-  "mcpServers" do zquick.json e as tools deles aparecem para o
-  assistente (prefixo mcp_) como se fossem nativas. Exemplo:
-    "mcpServers": {
-      "exemplo": { "command": "cmd",
-                   "args": ["/c", "npx", "-y", "@exemplo/mcp-server"] }
-    }
-  (servidor npx/node no Windows: use "cmd /c npx ..."; até 6
-  servidores, 40 tools cada; sobem no primeiro envio e são
-  encerrados ao sair do app)
-  SUBAGENTE: para investigações amplas (varrer muitos arquivos/
-  pastas, buscas repetidas na web) o assistente pode disparar um
-  SUBAGENTE de leitura — um agente à parte que NÃO vê a conversa,
-  investiga sozinho com as ferramentas de leitura e devolve um
-  relatório. A conversa fica limpa: só a conclusão entra nela.
-  SKILLS: playbooks .md na pasta skills ao lado do app. O nome e
-  a descrição (cabeçalho --- name:/description: ---) de cada um
-  aparecem para o assistente; quando a tarefa combina, ele carrega
-  as instruções completas com skill_read e as segue. Crie os seus
-  (formatos de trabalho, checklists, rotinas) — vira arquivo em
-  vez de repetir no chat. Reabra o app (Sair na bandeja → abrir)
-  depois de criar/remover skills.
-  Exemplos: "crie uma nota com a reunião de sexta 15h", "renomeie
-  o arquivo X para Y", "abra o Bloco de Notas", "quanto de disco
-  livre no C?", "mova os PDFs da Área de Trabalho para a pasta X".
-
-CONVERSA LONGA (compactação)
-  A conversa inteira é reenviada a cada pergunta (é assim que o
-  modelo mantém contexto). O rodapé, no canto direito, mostra o
-  consumo: "ctx 12% · ≈18.2k/200k" — percentual, contagem
-  aproximada de TOKENS e o limite do modelo em uso (o app já sabe
-  os da Z.ai/Kimi/DeepSeek/MiniMax/Qwen; modelo desconhecido =
-  128k, e dá para declarar os seus em "ctxLimits" no json).
-  Quando passa de ~28 mensagens ou 55% do limite, o app PERGUNTA
-  se pode compactar — a pergunta em si traz a contagem (mensagens,
-  KB e ≈tokens do contexto). As trocas antigas viram um resumo e
-  as últimas 6 mensagens ficam intactas. Se passar de ~40
-  mensagens ou 80% do limite, o início é descartado automaticamente
-  para não travar. Em qualquer dos casos o histórico completo
-  continua salvo no disco.
-
-CONFIG EXTRA (zquick.json, topo)
-  hotkey ......... "alt+q" (win/ctrl/alt/shift+tecla; combinação com
-                   Win depende de hook instável — evite)
-  maxTokens ...... limite da resposta (4096)
-  hideOnBlur ..... true = fecha ao perder foco
-  searchEngine ... "bing" (grátis, cliente) | "zai-server" (busca no
-                   SERVIDOR da Z.ai — melhor qualidade; recomendado)
-                   | "zai" (API de tools da Z.ai, se tiver saldo)
-  promptCache .... true = cache do prompt no servidor (a Z.ai aceita:
-                   as perguntas seguintes da conversa ficam mais
-                   baratas e o 1º token chega mais rápido)
-  ctxLimits ...... override do LIMITE DE CONTEXTO por modelo, em
-                   tokens (o rodapé e a compactação usam esse
-                   número): "ctxLimits": { "glm-4.7": 200000,
-                   "meu-modelo": 512000 }. Sem isso vale a tabela
-                   interna: kimi/minimax 256k; glm "cheio" 200k;
-                   glm flash/air/mini/lite, deepseek e qwen 128k
-  systemPrompt ... troca a personalidade do assistente
-  mcpServers ..... servidores MCP (stdio): { "nome": { "command":
-                   "...", "args": [...] } } — as tools deles ficam
-                   disponíveis ao assistente com prefixo mcp_ (ver
-                   AGENTE WINDOWS acima)
-
-PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
-  Tudo abaixo aparece com campos prontos na aba certa do ⚙; editar o
-  json à mão dá no mesmo (reinicie o app depois).
-
-  answerFontSize . tamanho do texto das respostas (13 = 100%). Ao
-                   mudar, A INTERFACE INTEIRA escala junto — botões,
-                   caixas e diálogos, não só a resposta.
-  windowOpacity .. opacidade da janela: 1.0 = opaca, 0.8 = 80%, 0.5 =
-                   metade. Aplica ao abrir o app (no ⚙ muda na hora,
-                   com régua de 40-100%; Ctrl+roda do mouse sobre a
-                   janela também, ao vivo).
-  theme .......... paleta de cores da janela inteira (fundo, texto,
-                   links, respostas, ícone da bandeja). Chaves e o que
-                   cada uma pinta (tudo em HEX #RRGGBB):
-
-    bg      fundo geral da janela      accent  links e citações [1]
-    card    fundo dos blocos q/resp    accent2 cursor do streaming
-    panel   botões e caixas combinadas code    texto entre `crases`
-    input   campo de digitar/listas    q       cor da sua pergunta
-    border  bordas                     dim     texto apagado/dicas
-    fg      texto principal            status  rodapé de status
-    scroll  polegar da barra de rolagem (o hover usa o accent)
-    trayA/trayB  gradiente do ícone Z na bandeja
-
-  Exemplo — tema escuro "clássico de terminal" com azul de CMD:
-
-    "windowOpacity": 0.8,
-    "theme": {
-      "bg": "#0C0C0C", "card": "#16161A", "panel": "#1E1E24",
-      "input": "#080808", "border": "#2E2E38", "fg": "#E4E4E4",
-      "dim": "#767676", "status": "#B2B2B2", "q": "#9CC7FF",
-      "accent": "#3B78FF", "accent2": "#6EA8FF", "code": "#8CD9FF",
-      "trayA": "#3B78FF", "trayB": "#1F4FC4", "scroll": "#50505C"
-    }
-
-  BARRA DE ROLAGEM (v3.22): a cor é a chave "scroll" acima (muda AO
-  VIVO no ✔ Aplicar do ⚙). O estilo é outra chave, "scrollStyle":
-  "pill" (fina arredondada, padrão) | "square" (fina reta) |
-  "classic" (a barra original do Windows, ignora a cor do tema) —
-  trocar o estilo vale ao REINICIAR o app.
-
-  Sem a seção "theme" vale a paleta escura padrão do ZQuick (o botão
-  "restaurar padrão" no ⚙ devolve ela). Só passe cores hex válidas
-  (# + 6 dígitos) — valor errado abre com as cores padrão. Editando o
-  json, reinicie o app (Sair na bandeja → abrir de novo) para aplicar;
-  pelo ⚙ (v3.23) TODAS as cores mudam na hora — inclusive o ⚙
-   aberto. Só os hovers (botões do topo, polegar da rolagem)
-   normalizam ao reabrir.
-
-  TEMAS SALVOS (v3.16, só pelo ⚙): digite um nome e clique em
-  "💾 salvar" para guardar as 15 cores atuais; "◀ aplicar" carrega o
-  tema escolhido de volta nas caixas (✔ Aplicar grava de fato) e "🗑"
-  apaga. Ficam na seção "themes" do json, um objeto por tema com as
-  mesmas 15 chaves do "theme". O botãozinho ⟲ do lado de cada hex
-  devolve só aquela cor para o padrão.
-
-  Os temas "padrão" e "matrix" (verde no preto) JÁ VÊM no aplicativo:
-  aparecem primeiro na lista, dão pra aplicar, mas não são apagados
-  nem sobrescritos — os seus ficam depois deles.
+  1x por dia (ao abrir) consulta os releases do GitHub; versão nova
+  → balão na bandeja: baixa, troca o exe e reinicia sozinho
+  (conversas e configurações ficam). Checar na hora: ⚙ → Geral →
+  "🔎 procurar agora". MSI pode também: baixe o .msi novo e instale
+  por cima.
 
 DESINSTALAR
-  Instalou pelo MSI? Configurações → Aplicativos → ZQuick → Desinstalar
-  (ou msiexec /x ZQuick-x.y.z.msi). A desinstalação NÃO apaga suas
-  conversas nem a configuração (history\ e zquick.json ficam em
-  %LOCALAPPDATA%\Programs\ZQuick — apague à mão se quiser).
-  Instalou pelo INSTALAR.cmd? Dê dois cliques em DESINSTALAR.cmd (na
-  pasta do kit). Ele encerra o app, remove o atalho da Inicialização
-  (e a chave de registro/tarefa ZQuick, se existirem) e apaga
-  %LOCALAPPDATA%\Programs\ZQuick — antes pergunta se você quer salvar
-  suas conversas e configuração (vão para Área de Trabalho\ZQuick-backup).
-  As notas do agente ficam em Documentos\ZQuick-Notas (apague à mão).
+  MSI: Configurações → Aplicativos → ZQuick → Desinstalar (não apaga
+  suas conversas/config). Kit: DESINSTALAR.cmd (pergunta se salva um
+  backup da pasta na Área de Trabalho).
 
-OBSERVAÇÕES
-  • Velocidade: perguntas simples levam ~5s até começar a resposta —
-    é o tempo do servidor da Z.ai gerar o primeiro token (o app já
-    mantém a conexão aquecida e mostra o texto em streaming assim
-    que ele nasce). Perguntas de atualidade: o app dispara a busca
-    em paralelo enquanto o modelo lê a pergunta (~8s na prática).
-    A busca em si é rápida (~0,3s) — o resto é o servidor gerar.
-  • zquick.ps1 é o código-fonte completo (PowerShell + C# embutido).
-    O exe foi gerado a partir dele com PS2EXE (no PC de origem,
-    .local\bin\zquick\build-exe.ps1).
-  • Alguns antivírus estranham exe feito com PS2EXE; se bloquear,
-    adicione exclusão para a pasta ZQuick.
-  • Log de diagnóstico: %TEMP%\zquick.log
+ONDE FICA TUDO
+  App e config .: %LOCALAPPDATA%\Programs\ZQuick
+  Conversas ..... history\ ao lado do app (as 200 mais recentes)
+  Notas do agente: Documentos\ZQuick-Notas
+  Log ........... %TEMP%\zquick.log
 ═══════════════════════════════════════════════════════════════════
