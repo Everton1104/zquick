@@ -108,10 +108,11 @@ USO
                 cores do tema (incl. a barra de rolagem), o estilo
                 dela (fina arredondada / fina reta / clássica),
                 buscador, maxTokens, promptCache,
-                hideOnBlur e systemPrompt. Aplica na hora o que dá
-                (janela, opacidade, fonte, textos); cores completas
-                valem ao REABRIR; troca de chave/modelo recria o motor
-                no próximo envio.
+                hideOnBlur e systemPrompt. Aplica na hora janela,
+                 opacidade, fonte e TODAS as cores (v3.23: repinta a
+                 janela inteira ao vivo — inclusive o ⚙ que está aberto
+                 e os cards da conversa); troca de chave/modelo recria
+                 o motor no próximo envio.
   — ▢ ✕ ........ moldura própria (sem a barra do Windows): — e ✕
                 OCULTAM para a bandeja (não fecham o app — sair de
                 verdade é no menu do ícone Z); ▢ maximiza/restaura
@@ -278,7 +279,9 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
   "restaurar padrão" no ⚙ devolve ela). Só passe cores hex válidas
   (# + 6 dígitos) — valor errado abre com as cores padrão. Editando o
   json, reinicie o app (Sair na bandeja → abrir de novo) para aplicar;
-  pelo ⚙ o fundo/textos mudam na hora e o resto vale ao reabrir.
+  pelo ⚙ (v3.23) TODAS as cores mudam na hora — inclusive o ⚙
+   aberto. Só os hovers (botões do topo, polegar da rolagem)
+   normalizam ao reabrir.
 
   TEMAS SALVOS (v3.16, só pelo ⚙): digite um nome e clique em
   "💾 salvar" para guardar as 15 cores atuais; "◀ aplicar" carrega o

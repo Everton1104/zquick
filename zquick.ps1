@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.22'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.23'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -173,6 +173,122 @@ function Get-ContrastFgHex([string]$hex) {
         if ((0.299 * $c.R + 0.587 * $c.G + 0.114 * $c.B) -gt 140) { return '#000000' }
     } catch {}
     '#FFFFFF'
+}
+# v3.23: repinta a janela principal AO VIVO apos o Aplicar — as cores do XAML sao
+# assadas no parse (Theme-Xaml troca os literais), entao logo/combo/botoes so mudavam
+# ao reiniciar. Mesmo criterio dos literais: varre a arvore visual e troca qualquer
+# brush que bate com a cor ANTIGA pela nova. Nao cobre triggers de hover de estilos
+# ja aplicados (ChromeBtn / polegar da scrollbar) — normalizam ao reiniciar.
+function Update-ThemeLive($changes) {
+    try {
+        if (-not $changes -or $changes.Count -eq 0) { return 0 }
+        $newBrushes = @{}
+        function Get-NewBrush([string]$hex) {
+            if (-not $newBrushes.ContainsKey($hex)) {
+                $nb = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString([string]$changes[$hex]))
+                $nb.Freeze(); $newBrushes[$hex] = $nb
+            }
+            $newBrushes[$hex]
+        }
+        function Swap-Colors($el, $dps) {
+            $n = 0
+            foreach ($dp in $dps) {
+                try {
+                    $b = $el.GetValue($dp)
+                    if ($b -is [System.Windows.Media.SolidColorBrush]) {
+                        $hex = '#' + $b.Color.ToString().Substring(3, 6).ToUpper()
+                        if ($changes.ContainsKey($hex)) { $el.SetValue($dp, (Get-NewBrush $hex)); $n++ }
+                    }
+                } catch {}
+            }
+            $n
+        }
+        $paints = 0
+        # 1) arvore visual (janela, estilos implicitos ja aplicados, BlockUIContainer
+        #    do icone de copiar quando paginado)
+        $vdps = @(
+            [System.Windows.Controls.Control]::BackgroundProperty,
+            [System.Windows.Controls.Control]::ForegroundProperty,
+            [System.Windows.Controls.Control]::BorderBrushProperty,
+            [System.Windows.Controls.Primitives.TextBoxBase]::CaretBrushProperty,
+            [System.Windows.Documents.TextElement]::ForegroundProperty,
+            [System.Windows.Shapes.Shape]::FillProperty,
+            [System.Windows.Shapes.Shape]::StrokeProperty
+        )
+        $stack = [System.Collections.Stack]::new()
+        $roots = @($window)
+        # v3.23: o ⚙ aberto repinta JUNTO — ele so re-parseia na proxima abertura;
+        # sem isso o dialogo ficava com as cores do tema da hora em que abriu
+        if ($script:setSW -and $script:setSW.IsLoaded) { $roots += $script:setSW }
+        foreach ($r in $roots) { $stack.Push($r) }
+        while ($stack.Count -gt 0) {
+            $el = $stack.Pop()
+            $paints += Swap-Colors $el $vdps
+            $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($el)
+            for ($i = 0; $i -lt $n; $i++) { $stack.Push([System.Windows.Media.VisualTreeHelper]::GetChild($el, $i)) }
+        }
+        # 2) FlowDocument — v3.23: TextElement (Paragraph/Run/Section) NAO e' Visual,
+        #    o VisualTreeHelper nao alcanca; percorre blocos/inlines na mao. cobre
+        #    placeholder, cards de resposta, perguntas do usuario (q), codigo e links
+        if ($AnswerDoc) {
+            $tdps = @(
+                [System.Windows.Documents.TextElement]::ForegroundProperty,
+                [System.Windows.Documents.TextElement]::BackgroundProperty
+            )
+            $ds = [System.Collections.Stack]::new()
+            foreach ($b in $AnswerDoc.Blocks) { $ds.Push($b) }
+            while ($ds.Count -gt 0) {
+                $te = $ds.Pop()
+                $paints += Swap-Colors $te $tdps
+                if ($te -is [System.Windows.Documents.List]) {
+                    foreach ($li in $te.ListItems) { $ds.Push($li) }
+                } elseif ($te -is [System.Windows.Documents.Section] -or $te -is [System.Windows.Documents.ListItem]) {
+                    foreach ($b2 in $te.Blocks) { $ds.Push($b2) }
+                } elseif ($te.PSObject.Properties['Inlines']) {
+                    foreach ($il in $te.Inlines) { $ds.Push($il) }
+                }
+            }
+        }
+        return $paints
+    } catch { Log "themelive: $_"; return 0 }
+}
+# v3.23: estilo do item do ComboBox recriado com as cores atuais (dropdown/lista e
+# selecao deixavam de seguir o tema ate reiniciar — objetos de estilo sao imutaveis,
+# entao o substituinte e' re-parseado e re-registrado no recurso implicito)
+function Update-ComboItemStyle {
+    try {
+        $x = ('<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="ComboBoxItem">' +
+              '<Setter Property="Foreground" Value="{0}"/><Setter Property="Cursor" Value="Hand"/>' +
+              '<Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem">' +
+              '<Border x:Name="Bd" Background="Transparent" Padding="8,5" CornerRadius="3" SnapsToDevicePixels="True">' +
+              '<ContentPresenter TextElement.Foreground="{{TemplateBinding Foreground}}"/></Border>' +
+              '<ControlTemplate.Triggers>' +
+              '<Trigger Property="IsHighlighted" Value="True"><Setter Property="Foreground" Value="{1}"/><Setter TargetName="Bd" Property="Background" Value="{2}"/></Trigger>' +
+              '<Trigger Property="IsSelected" Value="True"><Setter Property="Foreground" Value="{1}"/><Setter TargetName="Bd" Property="Background" Value="{2}"/></Trigger>' +
+              '</ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>') -f `
+              ([string]$T.fg), (Get-ContrastFgHex $T.accent), ([string]$T.accent)
+        $window.Resources[[System.Windows.Controls.ComboBoxItem]] = [System.Windows.Markup.XamlReader]::Parse($x)
+    } catch { Log "comboitem: $_" }
+}
+# v3.23: icone da bandeja redesenhavel — Aplicar troca trayA/trayB AO VIVO
+# (hicon antigo nao e' destruido: Apply e' raro, handle de 16px e' desprezivel)
+function Update-TrayIcon {
+    try {
+        $bmp = [System.Drawing.Bitmap]::new(16, 16)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $lg = [System.Drawing.Drawing2D.LinearGradientBrush]::new([System.Drawing.Rectangle]::new(0, 0, 16, 16), (HexTo-DrawColor $T.trayA), (HexTo-DrawColor $T.trayB), [single]45)
+        $g.FillRectangle($lg, 0, 0, 16, 16); $lg.Dispose()
+        $wb = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
+        $g.DrawString('Z', [System.Drawing.Font]::new('Segoe UI', 8.5, [System.Drawing.FontStyle]::Bold), $wb, [single]3, [single]1)
+        $wb.Dispose(); $g.Dispose()
+        $ico = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+        $bmp.Dispose()
+        if ($script:trayIcon) { try { $script:trayIcon.Dispose() } catch {} }
+        $script:trayIcon = $ico
+        if ($notify) { $notify.Icon = $ico }
+    } catch { Log "trayicon: $_" }
 }
 function Save-Config {
     try {
@@ -2583,7 +2699,7 @@ $xamlStr = @'
           <Button x:Name="MaxBtn" Content="▢" ToolTip="maximizar / restaurar" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="CloseBtn" Content="✕" ToolTip="ocultar na bandeja (sair de verdade: ícone Z → Sair)" Style="{StaticResource ChromeBtn}"/>
         </StackPanel>
-        <TextBlock Text="⚡ ZQuick" FontSize="15" FontWeight="SemiBold" Foreground="#E8E8EC" VerticalAlignment="Center"/>
+        <TextBlock x:Name="LogoText" Text="⚡ ZQuick" FontSize="15" FontWeight="SemiBold" Foreground="#E8E8EC" VerticalAlignment="Center"/>
       </DockPanel>
     </Border>
     <Border DockPanel.Dock="Bottom">
@@ -2672,7 +2788,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','QueueBar','QueueHeader','QueueScroll','QueuePanel','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'LogoText','ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','QueueBar','QueueHeader','QueueScroll','QueuePanel','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -2955,7 +3071,7 @@ function New-Card([string]$title) {
     if ($title) {
         $t = [System.Windows.Documents.Paragraph]::new()
         $null = $t.Inlines.Add([System.Windows.Documents.Run]::new($title))
-        $t.FontSize = (FSz 10); $t.Foreground = '#6E6E7A'; $t.Margin = '0,0,0,4'
+        $t.FontSize = (FSz 10); $t.Foreground = $T.dim; $t.Margin = '0,0,0,4'
         $sec.Blocks.Add($t) | Out-Null
     }
     @{ Section = $sec; Blocks = $sec.Blocks }
@@ -3389,6 +3505,61 @@ function Send-Current {
             Log ('arrowpos: combo {0:N0}px, seta x={1:N0}..{2:N0} (margem direita {3:N0}px, largura {4:N0}px)' -f $cb.ActualWidth, $pt.X, ($pt.X + $ar.ActualWidth), ($cb.ActualWidth - $pt.X - $ar.ActualWidth), $ar.ActualWidth)
             $StatusText.Text = 'arrowpos logado'
         } catch { Log "arrowpos erro: $_" }
+        return
+    }
+    if ($text -eq '/uitest themeprobe') {
+        # v3.23: cores AO VIVO dos controles que so mudavam ao reiniciar (logo, botao,
+        # combo) — o E2E muda o tema no ⚙, Aplica e confere aqui que repintaram
+        $InputBox.Clear()
+        try {
+            function Hex-Of($b) { if ($b -is [System.Windows.Media.SolidColorBrush]) { '#' + $b.Color.ToString().Substring(3, 6).ToUpper() } else { 'n/a' } }
+            Log ('themeprobe: win bg={0}; AnswerView bg={1}; setSW={2}; logo fg={3}; NewBtn bg={4}/fg={5}; ProfileBox bg={6}/fg={7}; TopBtn bg={8}/fg={9}; PassBtn bg={10}/fg={11}' -f `
+                (Hex-Of $window.Background), (Hex-Of $AnswerView.Background), $(if ($setSW -and $setSW.IsVisible) { (Hex-Of $setSW.Background) } else { 'fechado' }), `
+                (Hex-Of $LogoText.Foreground), (Hex-Of $NewBtn.Background), (Hex-Of $NewBtn.Foreground), (Hex-Of $ProfileBox.Background), (Hex-Of $ProfileBox.Foreground), `
+                (Hex-Of $TopBtn.Background), (Hex-Of $TopBtn.Foreground), (Hex-Of $PassBtn.Background), (Hex-Of $PassBtn.Foreground))
+            $StatusText.Text = 'themeprobe logado'
+        } catch { Log "themeprobe erro: $_" }
+        return
+    }
+    if ($text -eq '/uitest repaint') {
+        # v3.23: exercita o repaint ao vivo SEM tocar no config — troca fg/panel/input/
+        # card/dim por sentinelas EM MEMORIA, repinta (Update-ThemeLive), loga o estado
+        # sentinela e devolve tudo ao original. Diagnostico do E2E repaint.
+        $InputBox.Clear()
+        try {
+            $keys = @('fg', 'panel', 'input', 'card', 'dim', 'bg')
+            $old = @{}; foreach ($k in $keys) { $old[$k] = [string]$T[$k] }
+            $sent = @{ fg = '#FFB300'; panel = '#5C3A00'; input = '#26313B'; card = '#456789'; dim = '#ABC123'; bg = '#7851A9' }
+            function Hex-Of2($b) { if ($b -is [System.Windows.Media.SolidColorBrush]) { '#' + $b.Color.ToString().Substring(3, 6).ToUpper() } else { 'n/a' } }
+            function Doc-Probe {
+                # primeiro bloco do documento: card do placeholder (para fg, hint dim,
+                # fundo do card) ou pergunta do usuario (para q) — o que estiver na tela
+                $b0 = @($AnswerDoc.Blocks)[0]
+                if ($b0 -is [System.Windows.Documents.Section]) {
+                    $bl = @($b0.Blocks)
+                    $p1 = if ($bl[0] -is [System.Windows.Documents.Paragraph]) { Hex-Of2 $bl[0].Foreground } else { 'n/a' }
+                    $h1 = if ($bl.Count -gt 1 -and $bl[-1] -is [System.Windows.Documents.Paragraph]) { Hex-Of2 $bl[-1].Foreground } else { 'n/a' }
+                    return ('doc: para={0} hint={1} cardBg={2}' -f $p1, $h1, (Hex-Of2 $b0.Background))
+                }
+                if ($b0 -is [System.Windows.Documents.Paragraph]) { return ('doc: q={0}' -f (Hex-Of2 $b0.Foreground)) }
+                return 'doc: n/a'
+            }
+            Log ('repaint antes : logo={0} NewBtn={1} ProfileBox={2}; {3}' -f (Hex-Of2 $LogoText.Foreground), (Hex-Of2 $NewBtn.Background), (Hex-Of2 $ProfileBox.Background), (Doc-Probe))
+            $chg = @{}
+            foreach ($k in $keys) { $chg[$old[$k].ToUpper()] = $sent[$k]; $T[$k] = $sent[$k] }
+            $pint = Update-ThemeLive $chg
+            $window.Background = $T.bg   # mesma linha direta do SetApply
+            $window.UpdateLayout()
+            Log ('repaint sent  : win={0} logo={1} NewBtn={2} ProfileBox={3}; {4} ({5} pinturas; esperado win 7851A9, logo/para FFB300, NewBtn 5C3A00, ProfileBox 26313B, cardBg 456789, hint/q ABC123)' -f (Hex-Of2 $window.Background), (Hex-Of2 $LogoText.Foreground), (Hex-Of2 $NewBtn.Background), (Hex-Of2 $ProfileBox.Background), (Doc-Probe), $pint)
+            # devolve
+            $chg2 = @{}
+            foreach ($k in $keys) { $chg2[$sent[$k]] = $old[$k]; $T[$k] = $old[$k] }
+            $null = Update-ThemeLive $chg2
+            $window.Background = $T.bg
+            $window.UpdateLayout()
+            Log ('repaint volta : logo={0} NewBtn={1} ProfileBox={2}; {3}' -f (Hex-Of2 $LogoText.Foreground), (Hex-Of2 $NewBtn.Background), (Hex-Of2 $ProfileBox.Background), (Doc-Probe))
+            $StatusText.Text = 'repaint logado'
+        } catch { Log "repaint erro: $_"; $StatusText.Text = 'repaint erro (log)' }
         return
     }
     if ($text -eq '/uitest scrollprobe') {
@@ -4418,6 +4589,8 @@ function Show-Settings {
                     if ($hx -match '^#[0-9A-Fa-f]{6}$') { $newTheme[$k] = $hx }
                     else { $bad += "cor $k"; $newTheme[$k] = $T[$k] }
                 }
+                $oldT = @{}   # v3.23: cores ANTES do apply — base do repaint ao vivo
+                foreach ($k in $script:setColorKeys) { $oldT[$k] = ([string]$T[$k]).ToUpper() }
                 $allDef = $true
                 foreach ($k in $script:setColorKeys) { if ($newTheme[$k] -ne $themeDefaults[$k]) { $allDef = $false } }
                 if ($bad.Count -eq 0) {
@@ -4461,6 +4634,39 @@ function Show-Settings {
                         $window.Resources['ZScrollBrush'] = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString([string]$T.scroll))
                     }
                 } catch { Log "scrollbrush: $_" }
+                # v3.23: repaint TOTAL — troca ao vivo qualquer brush cor-antiga->cor-nova
+                # na arvore visual (logo, combos, botoes, barras, cards antigos), recria o
+                # estilo dos itens do combo e redesenha a bandeja se trayA/trayB mudaram
+                try {
+                    $chg = @{}
+                    foreach ($k in $script:setColorKeys) {
+                        # trayA/trayB nao pintam elemento nenhum (so a bandeja, via
+                        # Update-TrayIcon) — e o matrix tem trayA=accent, o que colidia
+                        # as duas trocas na MESMA chave do mapa (hex antigo -> 1 novo)
+                        if ($k -eq 'trayA' -or $k -eq 'trayB') { continue }
+                        $nv = ([string]$T[$k]).ToUpper()
+                        if ($oldT[$k] -cne $nv) { $chg[$oldT[$k]] = $nv }
+                    }
+                    if ($chg.ContainsKey($oldT['accent'])) {
+                        # contraste do accent antigo -> novo; NAO sobrescreve troca de
+                        # cor real (matrix: contraste do accent e' #000000 = bg antigo)
+                        $ck = (Get-ContrastFgHex $oldT['accent']).ToUpper()
+                        if (-not $chg.ContainsKey($ck)) { $chg[$ck] = (Get-ContrastFgHex $T.accent).ToUpper() }
+                    }
+                    Update-ComboItemStyle
+                    # 📌/⚡ sao pintados POR CODIGO (accent+contraste quando ativos) — o
+                    # repaint por cor-antiga nao alcanca; re-chama os setters deles
+                    Set-TopBtnVisual ([bool]$cfg.alwaysOnTop)
+                    Set-PassBtnVisual ([bool]$cfg.passthrough)
+                    if ($chg.ContainsKey($oldT['trayA']) -or $chg.ContainsKey($oldT['trayB'])) { Update-TrayIcon }
+                    $paints = Update-ThemeLive $chg
+                    if ($chg.Count -gt 0) { Log ('tema: ' + $paints + ' pintura(s) ao vivo em ' + $chg.Count + ' cor(es) trocada(s)') }
+                } catch { Log "themelive-apply: $_" }
+                try {
+                    $wbg = 'n/a'; if ($window.Background -is [System.Windows.Media.SolidColorBrush]) { $wbg = $window.Background.Color.ToString().Substring(3, 6).ToUpper() }
+                    $sbg = 'n/a'; if ($script:setSW -and $script:setSW.IsVisible) { if ($script:setSW.Background -is [System.Windows.Media.SolidColorBrush]) { $sbg = $script:setSW.Background.Color.ToString().Substring(3, 6).ToUpper() } else { $sbg = 'invis' } }
+                    Log ("winbg pos-apply: win=$wbg setSW=$sbg (T.bg=$($T.bg))")
+                } catch {}
                 $AnswerDoc.Foreground = $T.fg
                 $StatusText.Foreground = $T.status; $ModelText.Foreground = $T.dim
                 $InputBox.Background = $T.input; $InputBox.Foreground = $T.fg; $InputBox.CaretBrush = $T.fg
@@ -4478,7 +4684,7 @@ function Show-Settings {
                 Update-ProfileBox
                 Log ("config: aplicado (janela {0}x{1}, opacidade {2:P0}, fonte {3}pt ({4:P0} da interface){5})" -f $cfg.window.width, $cfg.window.height, $cfg.windowOpacity, $cfg.answerFontSize, ($cfg.answerFontSize / 13.0), $engNote)
                 $ssNote = $(if ([string]$cfg.scrollStyle -ne $ssPrev) { ' • estilo da rolagem vale ao reiniciar' } else { '' })
-                $script:setG['SetStatus'].Text = '✓ aplicado — fonte na interface toda; cores completas ao reabrir' + $ssNote + $engNote
+                $script:setG['SetStatus'].Text = '✓ aplicado — cores e fonte na interface toda' + $ssNote + $engNote
                 $script:setG['SetKey'].Clear()
             } catch { Log "config erro: $_"; $script:setG['SetStatus'].Text = "✕ $_" }
         })
@@ -5627,19 +5833,7 @@ $window.Add_Closing({ param($s, $e)
 })
 
 # ---------- tray icon ----------
-$bmp = [System.Drawing.Bitmap]::new(16, 16)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$g.Clear([System.Drawing.Color]::Transparent)
-$lgBrush = [System.Drawing.Drawing2D.LinearGradientBrush]::new([System.Drawing.Rectangle]::new(0, 0, 16, 16), (HexTo-DrawColor $T.trayA), (HexTo-DrawColor $T.trayB), [single]45)
-$g.FillRectangle($lgBrush, 0, 0, 16, 16)
-$lgBrush.Dispose()
-$wBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
-$g.DrawString('Z', [System.Drawing.Font]::new('Segoe UI', 8.5, [System.Drawing.FontStyle]::Bold), $wBrush, [single]3, [single]1)
-$wBrush.Dispose()
-$g.Dispose()
-$hIcon = $bmp.GetHicon()
-$icon = [System.Drawing.Icon]::FromHandle($hIcon)
+Update-TrayIcon   # v3.23: desenho em funcao propria — Aplicar redesenha ao vivo
 
 $menu = [System.Windows.Forms.ContextMenuStrip]::new()
 $miShow = [System.Windows.Forms.ToolStripMenuItem]::new('Mostrar')
@@ -5664,7 +5858,7 @@ $menu.Items.AddRange([System.Windows.Forms.ToolStripItem[]]@(
     $miShow, [System.Windows.Forms.ToolStripSeparator]::new(), $miWiz, $miUpd, [System.Windows.Forms.ToolStripSeparator]::new(), $miExit))
 
 $notify = [System.Windows.Forms.NotifyIcon]::new()
-$notify.Icon = $icon; $notify.Text = 'ZQuick'
+$notify.Icon = $script:trayIcon; $notify.Text = 'ZQuick'
 $notify.ContextMenuStrip = $menu; $notify.Visible = $true
 $notify.Add_DoubleClick({ Toggle-Window })
 # v3.20: clique no balão de "atualização disponível" abre o diálogo de download
