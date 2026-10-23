@@ -104,8 +104,10 @@ USO
   ⚙ ........... CONFIGURAÇÕES sem mexer em arquivo: 4 abas (Perfil
                 & chaves / Janela / Aparência / Geral) cobrem chave de
                 API e modelos por perfil, tamanho e centralização da
-                janela, opacidade, fonte e tamanho do texto, as 14
-                cores do tema, buscador, maxTokens, promptCache,
+                janela, opacidade, fonte e tamanho do texto, as 15
+                cores do tema (incl. a barra de rolagem), o estilo
+                dela (fina arredondada / fina reta / clássica),
+                buscador, maxTokens, promptCache,
                 hideOnBlur e systemPrompt. Aplica na hora o que dá
                 (janela, opacidade, fonte, textos); cores completas
                 valem ao REABRIR; troca de chave/modelo recria o motor
@@ -252,6 +254,7 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
     input   campo de digitar/listas    q       cor da sua pergunta
     border  bordas                     dim     texto apagado/dicas
     fg      texto principal            status  rodapé de status
+    scroll  polegar da barra de rolagem (o hover usa o accent)
     trayA/trayB  gradiente do ícone Z na bandeja
 
   Exemplo — tema escuro "clássico de terminal" com azul de CMD:
@@ -262,8 +265,14 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
       "input": "#080808", "border": "#2E2E38", "fg": "#E4E4E4",
       "dim": "#767676", "status": "#B2B2B2", "q": "#9CC7FF",
       "accent": "#3B78FF", "accent2": "#6EA8FF", "code": "#8CD9FF",
-      "trayA": "#3B78FF", "trayB": "#1F4FC4"
+      "trayA": "#3B78FF", "trayB": "#1F4FC4", "scroll": "#50505C"
     }
+
+  BARRA DE ROLAGEM (v3.22): a cor é a chave "scroll" acima (muda AO
+  VIVO no ✔ Aplicar do ⚙). O estilo é outra chave, "scrollStyle":
+  "pill" (fina arredondada, padrão) | "square" (fina reta) |
+  "classic" (a barra original do Windows, ignora a cor do tema) —
+  trocar o estilo vale ao REINICIAR o app.
 
   Sem a seção "theme" vale a paleta escura padrão do ZQuick (o botão
   "restaurar padrão" no ⚙ devolve ela). Só passe cores hex válidas
@@ -272,10 +281,10 @@ PERSONALIZAÇÃO (pelo menu ⚙ da janela — ou direto no zquick.json)
   pelo ⚙ o fundo/textos mudam na hora e o resto vale ao reabrir.
 
   TEMAS SALVOS (v3.16, só pelo ⚙): digite um nome e clique em
-  "💾 salvar" para guardar as 14 cores atuais; "◀ aplicar" carrega o
+  "💾 salvar" para guardar as 15 cores atuais; "◀ aplicar" carrega o
   tema escolhido de volta nas caixas (✔ Aplicar grava de fato) e "🗑"
   apaga. Ficam na seção "themes" do json, um objeto por tema com as
-  mesmas 14 chaves do "theme". O botãozinho ⟲ do lado de cada hex
+  mesmas 15 chaves do "theme". O botãozinho ⟲ do lado de cada hex
   devolve só aquela cor para o padrão.
 
   Os temas "padrão" e "matrix" (verde no preto) JÁ VÊM no aplicativo:

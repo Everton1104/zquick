@@ -92,15 +92,15 @@ if (-not $tab) { throw 'aba Aparencia nao achada' }
 $tab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
 Start-Sleep -Milliseconds 700
 
-# 1. botaozinho ⟲ existe em cada uma das 14 linhas
+# 1. botaozinho ⟲ existe em cada uma das 15 linhas (v3.22: + 'Barra de rolagem')
 $bc = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
 $rlBtns = @($sw.FindAll([System.Windows.Automation.TreeScope]::Descendants, $bc)) | Where-Object { $_.Current.Name -eq $rl }
 "botoes reset: $($rlBtns.Count)"
-if ($rlBtns.Count -ne 14) { throw "esperava 14 botoes reset, achei $($rlBtns.Count)" }
+if ($rlBtns.Count -ne 15) { throw "esperava 15 botoes reset, achei $($rlBtns.Count)" }
 
 # 2. salva um tema com sentinela na 1a cor
 $hexEdits = @(Get-HexEdits $sw)
-if ($hexEdits.Count -lt 14) { throw "esperava 14 hex, achei $($hexEdits.Count)" }
+if ($hexEdits.Count -lt 15) { throw "esperava 15 hex, achei $($hexEdits.Count)" }
 $h0 = $hexEdits[0]; $v0 = Get-Val $h0
 # sentinela fixa #ABCDEF; o default da 1a chave (bg) e' sempre #202024
 $sent = '#ABCDEF'; $def0 = '#202024'

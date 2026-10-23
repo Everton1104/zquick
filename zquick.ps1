@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.21'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.22'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -59,6 +59,7 @@ $cfg = @{
     checkUpdates   = $true     # v3.20: procura atualização no GitHub 1x/dia (balão se houver nova)
     lastUpdateCheck = $null    # v3.20: última consulta (throttle de 20h entre checagens automáticas)
     updateUrl      = $null     # v3.20: override do feed de releases (teste/espelho privado)
+    scrollStyle    = 'pill'    # v3.22: barra de rolagem — 'pill' (fina arredondada) | 'square' (fina reta) | 'classic' (padrão do Windows, sem tema)
     profiles      = @{
         zai = @{
             label    = 'Z.ai GLM'
@@ -74,7 +75,7 @@ function Reload-Config {
     if (-not (Test-Path $cfgPath)) { return }
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','autoCompact','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers','ctxLimits','checkUpdates','lastUpdateCheck','updateUrl')) {
+        foreach ($k in @('profile','model','hotkey','maxTokens','maxRounds','autoCompact','searchEngine','promptCache','hideOnBlur','systemPrompt','windowOpacity','alwaysOnTop','passthrough','answerFont','answerFontSize','mcpServers','ctxLimits','checkUpdates','lastUpdateCheck','updateUrl','scrollStyle')) {
             if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
         }
         if ($j.window) {
@@ -109,6 +110,7 @@ $T = @{
     accent = '#8B9CF6'   # links
     accent2 = '#8B7CF6'  # cursor/streaming
     code   = '#A9DCFC'; trayA = '#8B7CF6'; trayB = '#6358C8'
+    scroll = '#50505C'   # v3.22: polegar da barra de rolagem (hover = accent)
 }
 $themeDefaults = $T.Clone()   # Onda 6: base p/ "restaurar cores padrão" no diálogo ⚙
 # v3.16.1: temas embutidos — vêm no app, aparecem primeiro na lista do ⚙ e não apagam
@@ -118,7 +120,7 @@ $builtinThemes = [ordered]@{
         bg = '#000000'; card = '#0A140A'; panel = '#0E1A0E'; input = '#040804'; border = '#1F4A1F'
         fg = '#2EFF2E'; dim = '#1E8A1E'; status = '#7CD97C'
         q = '#B4FFB4'; accent = '#00FF41'; accent2 = '#39FF14'
-        code = '#98FB98'; trayA = '#00FF41'; trayB = '#008000'
+        code = '#98FB98'; trayA = '#00FF41'; trayB = '#008000'; scroll = '#2E9E2E'
     }
 }
 if ($cfg.theme) {
@@ -127,10 +129,19 @@ if ($cfg.theme) {
 # aplica cores do tema sobre os literais dos XAML (janela + dialogos) antes do parse;
 # v3.8: tambem multiplica todo FontSize="N" pela escala global (13 = 100%)
 function Theme-Xaml([string]$x) {
+    # v3.22: scrollbar — 'classic' remove o bloco todo (volta a do Windows);
+    # raio do polegar depende do estilo ('pill' arredondado, 'square' reto)
+    if ([string]$cfg.scrollStyle -eq 'classic') {
+        $x = [regex]::Replace($x, '(?s)<!--ZQSCR-->.*?<!--/ZQSCR-->\s*', '')
+    } else {
+        $x = $x.Replace('ZQSCRAD', $(if ([string]$cfg.scrollStyle -eq 'square') { '0' } else { '3' }))
+        $x = $x.Replace('<!--ZQSCR-->', '').Replace('<!--/ZQSCR-->', '')
+    }
     foreach ($pair in @(
         @('#202024', $T.bg), @('#2A2A30', $T.panel), @('#16161A', $T.input), @('#3A3A44', $T.border),
         @('#E8E8EC', $T.fg), @('#9A9AA5', $T.status), @('#6E6E7A', $T.dim),
-        @('#3B78FF', $T.accent), @('#C0FFEE', (Get-ContrastFgHex $T.accent))
+        @('#3B78FF', $T.accent), @('#C0FFEE', (Get-ContrastFgHex $T.accent)),
+        @('#50505C', $T.scroll)
     )) { $x = $x.Replace($pair[0], $pair[1]) }
     if ([Math]::Abs($script:fscale - 1.0) -gt 0.001) {
         $me = [System.Text.RegularExpressions.MatchEvaluator]{ param($m)
@@ -173,6 +184,7 @@ function Save-Config {
             systemPrompt = $cfg.systemPrompt; windowOpacity = $cfg.windowOpacity; alwaysOnTop = $cfg.alwaysOnTop
             passthrough = $cfg.passthrough
             checkUpdates = [bool]$cfg.checkUpdates; lastUpdateCheck = $cfg.lastUpdateCheck; updateUrl = $cfg.updateUrl
+            scrollStyle = $cfg.scrollStyle
             window = $cfg.window; answerFont = $cfg.answerFont; answerFontSize = $cfg.answerFontSize
             theme = $cfg.theme; themes = $cfg.themes; ctxLimits = $cfg.ctxLimits; profiles = $cfg.profiles; allow = $cfg.allow; mcpServers = $cfg.mcpServers
         }
@@ -2402,6 +2414,68 @@ $xamlStr = @'
         </Trigger>
       </Style.Triggers>
     </Style>
+    <!--ZQSCR-->
+    <!-- v3.22: scrollbar FINA no tema — cor = chave "scroll" (⚙→Aparência); estilo
+         (fina arredondada / fina reta / clássica do Windows) escolhido no ⚙→Aparência;
+         hover do polegar = accent; Theme-Xaml remove o bloco quando o estilo é clássico. -->
+    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.DecreaseRepeatButton>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.IncreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Focusable="False" Margin="1">
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
+                          </Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Orientation" Value="Horizontal">
+                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                <Setter Property="MinHeight" Value="8"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Vertical">
+          <Setter Property="Width" Value="8"/>
+        </Trigger>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Height" Value="8"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <!--/ZQSCR-->
     <!-- v3.18: ComboBox com visual do tema (fechado = input; lista = panel; foco/hover = accent).
          Template proprio porque o padrao do WPF ignora Background/Foreground e abre lista branca;
          cobre os dois modos: normal (ContentSite) e editavel (PART_EditableTextBox, ex.: SetFont). -->
@@ -2432,7 +2506,7 @@ $xamlStr = @'
                     <ToggleButton.Template>
                       <ControlTemplate TargetType="ToggleButton">
                         <Border Background="Transparent">
-                          <Path Data="M0,0 L4.5,4.5 9,0 Z" Fill="#6E6E7A" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                          <Path x:Name="Arrow" Data="M0,0 L4.5,4.5 9,0 Z" Fill="#6E6E7A" HorizontalAlignment="Right" Margin="0,0,6,0" VerticalAlignment="Center"/>
                         </Border>
                       </ControlTemplate>
                     </ToggleButton.Template>
@@ -3302,6 +3376,75 @@ function Send-Current {
         Open-MentionDialog | Out-Null
         return
     }
+    if ($text -eq '/uitest arrowpos') {
+        # v3.22: posicao REAL da seta do ComboBox (bug: estava centralizada) — o E2E
+        # confere pelo log que ela termina perto da borda direita
+        $InputBox.Clear()
+        try {
+            $cb = $ProfileBox
+            $null = $cb.Template.FindName('Toggle', $cb)
+            $tgl = $cb.Template.FindName('Toggle', $cb)
+            $ar = $tgl.Template.FindName('Arrow', $tgl)
+            $pt = $ar.TranslatePoint([System.Windows.Point]::new(0, 0), $cb)
+            Log ('arrowpos: combo {0:N0}px, seta x={1:N0}..{2:N0} (margem direita {3:N0}px, largura {4:N0}px)' -f $cb.ActualWidth, $pt.X, ($pt.X + $ar.ActualWidth), ($cb.ActualWidth - $pt.X - $ar.ActualWidth), $ar.ActualWidth)
+            $StatusText.Text = 'arrowpos logado'
+        } catch { Log "arrowpos erro: $_" }
+        return
+    }
+    if ($text -eq '/uitest scrollprobe') {
+        # v3.22: estado REAL da scrollbar — enche a resposta (barra aparece), varre a
+        # arvore visual e loga largura/cor/estilo (E2E assert pelo log). Tudo em
+        # try/catch: hook de teste NUNCA pode derrubar o app (licao do FATAL).
+        $InputBox.Clear()
+        try {
+            1..120 | ForEach-Object {
+                $p = [System.Windows.Documents.Paragraph]::new()
+                $null = $p.Inlines.Add([System.Windows.Documents.Run]::new('linha de teste scrollprobe ' + $_))
+                $null = $AnswerDoc.Blocks.Add($p)
+            }
+            $window.UpdateLayout()   # layout sincrono: Start-Sleep bloqueia o dispatcher e a barra (Auto) nem nasce a tempo
+            $vis = @()
+            $stack = [System.Collections.Stack]::new(); $stack.Push($window)
+            while ($stack.Count -gt 0) {
+                $el = $stack.Pop()
+                $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($el)
+                for ($i = 0; $i -lt $n; $i++) {
+                    $c = [System.Windows.Media.VisualTreeHelper]::GetChild($el, $i)
+                    if ($c -is [System.Windows.Controls.Primitives.ScrollBar] -and $c.ActualWidth -gt 1) { $vis += $c }
+                    $stack.Push($c)
+                }
+            }
+            $br = $null
+            try { if ($window.Resources.Contains('ZScrollBrush')) { $br = $window.Resources['ZScrollBrush'] } } catch {}
+            $cor = $(if ($br) { '#' + $br.Color.ToString().Substring(3, 6).ToUpper() } else { 'windows' })
+            $w1 = $(if ($vis.Count) { [Math]::Round($vis[0].ActualWidth, 1) } else { -1 })
+            # diagnostico: Background REAL da barra (prova que o estilo implicito aplicou,
+            # e nao so que o recurso existe) + Width/MinWidth de onde vem a largura
+            $bgReal = 'n/a'
+            if ($vis.Count) {
+                $b = $vis[0].Background
+                if ($b -is [System.Windows.Media.SolidColorBrush]) { $bgReal = '#' + $b.Color.ToString().Substring(3, 6).ToUpper() } elseif ($null -ne $b) { $bgReal = $b.GetType().Name }
+            }
+            $wset = $(if ($vis.Count) { [string]$vis[0].Width } else { '-' })
+            $wmin = $(if ($vis.Count) { [string]$vis[0].MinWidth } else { '-' })
+            # raio do polegar: pill=3, fino reto=0, classico=sem ThBd (template do Windows)
+            $raio = 'n/a'
+            if ($vis.Count -and $br) {
+                try {
+                    $tp = $vis[0].Template
+                    $trk = $tp.FindName('PART_Track', $vis[0])
+                    if ($trk -and $trk.Thumb -and $trk.Thumb.Template) {
+                        $thbd = $trk.Thumb.Template.FindName('ThBd', $trk.Thumb)
+                        if ($thbd) { $raio = [string][int]$thbd.CornerRadius.TopLeft }
+                    }
+                } catch { $raio = 'erro' }
+                if ($raio -eq 'n/a') { $raio = 'windows' }
+            }
+            Log ('scrollprobe: {0} scrollbar(s) visivel(is); largura da 1a={1}px (Width={2},MinWidth={3}); estilo custom={4}; cor={5}; bg da barra={6}; raio={7}' -f $vis.Count, $w1, $wset, $wmin, [bool]$br, $cor, $bgReal, $raio)
+            $StatusText.Text = "scrollprobe: $($vis.Count) barra(s), largura $w1, cor $cor"
+        } catch { Log "scrollprobe erro: $_"; $StatusText.Text = 'scrollprobe erro (log)' }
+        return
+    }
     $imgs = [System.Collections.Generic.List[string]]::new()
     $txtFiles = [System.Collections.Generic.List[string[]]]::new()
     $pdfs = [System.Collections.Generic.List[string[]]]::new()
@@ -3573,6 +3716,66 @@ function Show-Settings {
         </Trigger>
       </Style.Triggers>
     </Style>
+    <!--ZQSCR-->
+    <!-- v3.22: scrollbar FINA no tema (idem janela principal) -->
+    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.DecreaseRepeatButton>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.IncreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Focusable="False" Margin="1">
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
+                          </Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Orientation" Value="Horizontal">
+                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                <Setter Property="MinHeight" Value="8"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Vertical">
+          <Setter Property="Width" Value="8"/>
+        </Trigger>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Height" Value="8"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <!--/ZQSCR-->
     <!-- v3.18: idem janela principal + campos de texto: sem estilo implicito os TextBox/PasswordBox
          do dialogo caem no BRANCO padrao do WPF (so a janela principal declara cores locais) -->
     <Style TargetType="ComboBox">
@@ -3602,7 +3805,7 @@ function Show-Settings {
                     <ToggleButton.Template>
                       <ControlTemplate TargetType="ToggleButton">
                         <Border Background="Transparent">
-                          <Path Data="M0,0 L4.5,4.5 9,0 Z" Fill="#6E6E7A" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                          <Path x:Name="Arrow" Data="M0,0 L4.5,4.5 9,0 Z" Fill="#6E6E7A" HorizontalAlignment="Right" Margin="0,0,6,0" VerticalAlignment="Center"/>
                         </Border>
                       </ControlTemplate>
                     </ToggleButton.Template>
@@ -3789,6 +3992,9 @@ function Show-Settings {
               <TextBlock Text="Cores (hex #RRGGBB — efeito completo ao reabrir; principais superfícies aplicam na hora)" Foreground="#9A9AA5" FontSize="11" Margin="0,6,0,6"/>
               <UniformGrid x:Name="SetColors" Columns="2"/>
               <Button x:Name="SetResetColors" Content="restaurar cores padrão" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+              <TextBlock Text="Barra de rolagem — estilo (vale ao reiniciar; a cor aplica na hora)" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,4"/>
+              <ComboBox x:Name="SetScrollStyle" Width="190" FontSize="12" HorizontalAlignment="Left"
+                        ToolTip="fino arredondado (padrão) · fino reto · clássico do Windows (sem cor do tema)"/>
               <TextBlock Text="Temas salvos" Foreground="#9A9AA5" FontSize="11" Margin="0,14,0,4"/>
               <StackPanel Orientation="Horizontal">
                 <TextBox x:Name="SetThemeName" Width="120" ToolTip="nome do tema" FontSize="12"/>
@@ -3831,7 +4037,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetWiz','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetAutoUpd','SetUpdCheck','SetUpdStatus','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetWiz','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetScrollStyle','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetAutoUpd','SetUpdCheck','SetUpdStatus','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
@@ -3880,7 +4086,7 @@ function Show-Settings {
         & $script:setFillProf ([string]$cfg.profile)
 
         # ---- grade de cores (swatch + nome + hex) ----
-        $colorKeys = @('bg','card','panel','input','border','fg','dim','status','q','accent','accent2','code','trayA','trayB')
+        $colorKeys = @('bg','card','panel','input','border','fg','dim','status','q','accent','accent2','code','trayA','trayB','scroll')
         # v3.15: nomes legiveis (tooltip mostra a chave usada no json/LEIA-ME)
         $colorNames = @{
             bg = 'Fundo da janela';    card = 'Card da resposta';   panel = 'Painéis/diálogos'
@@ -3888,6 +4094,7 @@ function Show-Settings {
             dim = 'Texto secundário';  status = 'Barra de status';  q = 'Pergunta'
             accent = 'Destaque/enviar'; accent2 = 'Destaque 2';     code = 'Código'
             trayA = 'Bandeja (início)'; trayB = 'Bandeja (fim)'
+            scroll = 'Barra de rolagem'
         }
         $colorDesc = @{
             bg      = 'fundo geral da janela principal'
@@ -3904,6 +4111,7 @@ function Show-Settings {
             code    = 'trechos de código no meio do texto'
             trayA   = 'início do gradiente do ícone da bandeja'
             trayB   = 'fim do gradiente do ícone da bandeja'
+            scroll  = 'polegar da barra de rolagem (hover usa o destaque)'
         }
         $boxes = @{}
         foreach ($k in $colorKeys) {
@@ -3951,6 +4159,15 @@ function Show-Settings {
         }
         $script:setBoxes = $boxes
         $script:setColorKeys = $colorKeys
+
+        # ---- v3.22: estilo da barra de rolagem (fina arredondada / fina reta / clássica) ----
+        $g['SetScrollStyle'].Items.Clear()
+        foreach ($it in @('fino arredondado', 'fino reto', 'clássico do Windows')) { $null = $g['SetScrollStyle'].Items.Add($it) }
+        $g['SetScrollStyle'].SelectedItem = $(switch ([string]$cfg.scrollStyle) {
+            'square'  { 'fino reto' }
+            'classic' { 'clássico do Windows' }
+            default   { 'fino arredondado' }
+        })
 
         # ---- v3.15: mini ZQuick — espelho das cores ao vivo (todas as 14 chaves) ----
         $pv = @{}
@@ -4207,6 +4424,11 @@ function Show-Settings {
                     $cfg.theme = $(if ($allDef) { $null } else { [pscustomobject]$newTheme })
                     foreach ($k in $script:setColorKeys) { $T[$k] = $newTheme[$k] }
                 }
+                # v3.22: estilo da barra de rolagem (pill/square/classic)
+                $ssPrev = [string]$cfg.scrollStyle
+                $cfg.scrollStyle = $(switch ([string]$script:setG['SetScrollStyle'].SelectedItem) {
+                    'fino reto' { 'square' }; 'clássico do Windows' { 'classic' }; default { 'pill' }
+                })
                 # geral
                 $cfg.searchEngine = [string]$script:setG['SetSearch'].SelectedItem
                 $mt = 0
@@ -4232,6 +4454,13 @@ function Show-Settings {
                 try { Set-FontScale ([double]$cfg.answerFontSize / 13.0) } catch { Log "fontscale apply: $_" }
                 try { $AnswerDoc.FontFamily = [System.Windows.Media.FontFamily]::new([string]$cfg.answerFont) } catch {}
                 $window.Background = $T.bg
+                # v3.22: cor da scrollbar AO VIVO — o estilo usa DynamicResource ZScrollBrush;
+                # trocar o ESTILO (fino/classico) exige reiniciar (template e' resolvido no parse)
+                try {
+                    if ($window.Resources.Contains('ZScrollBrush')) {
+                        $window.Resources['ZScrollBrush'] = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString([string]$T.scroll))
+                    }
+                } catch { Log "scrollbrush: $_" }
                 $AnswerDoc.Foreground = $T.fg
                 $StatusText.Foreground = $T.status; $ModelText.Foreground = $T.dim
                 $InputBox.Background = $T.input; $InputBox.Foreground = $T.fg; $InputBox.CaretBrush = $T.fg
@@ -4248,7 +4477,8 @@ function Show-Settings {
                 if ($pn -eq [string]$cfg.profile) { Update-ModelBox }
                 Update-ProfileBox
                 Log ("config: aplicado (janela {0}x{1}, opacidade {2:P0}, fonte {3}pt ({4:P0} da interface){5})" -f $cfg.window.width, $cfg.window.height, $cfg.windowOpacity, $cfg.answerFontSize, ($cfg.answerFontSize / 13.0), $engNote)
-                $script:setG['SetStatus'].Text = '✓ aplicado — fonte na interface toda; cores completas ao reabrir' + $engNote
+                $ssNote = $(if ([string]$cfg.scrollStyle -ne $ssPrev) { ' • estilo da rolagem vale ao reiniciar' } else { '' })
+                $script:setG['SetStatus'].Text = '✓ aplicado — fonte na interface toda; cores completas ao reabrir' + $ssNote + $engNote
                 $script:setG['SetKey'].Clear()
             } catch { Log "config erro: $_"; $script:setG['SetStatus'].Text = "✕ $_" }
         })
@@ -4475,6 +4705,66 @@ function Show-History {
         </Trigger>
       </Style.Triggers>
     </Style>
+    <!--ZQSCR-->
+    <!-- v3.22: scrollbar FINA no tema (idem janela principal) -->
+    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.DecreaseRepeatButton>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.IncreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Focusable="False" Margin="1">
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
+                          </Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Orientation" Value="Horizontal">
+                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                <Setter Property="MinHeight" Value="8"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Vertical">
+          <Setter Property="Width" Value="8"/>
+        </Trigger>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Height" Value="8"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <!--/ZQSCR-->
   </Window.Resources>
   <DockPanel>
     <Border DockPanel.Dock="Top" Padding="14,8,4,6">
@@ -5521,6 +5811,68 @@ function Show-UpdateWindow($u) {
         Title='ZQuick — atualização' WindowStyle='None' AllowsTransparency='True'
         Background='Transparent' WindowStartupLocation='CenterOwner'
         SizeToContent='Height' Width='480' ResizeMode='NoResize' ShowInTaskbar='False'>
+  <Window.Resources>
+    <!--ZQSCR-->
+    <!-- v3.22: scrollbar FINA no tema (idem janela principal) -->
+    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.DecreaseRepeatButton>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.IncreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Focusable="False" Margin="1">
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
+                          </Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Orientation" Value="Horizontal">
+                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                <Setter Property="MinHeight" Value="8"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Vertical">
+          <Setter Property="Width" Value="8"/>
+        </Trigger>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Height" Value="8"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <!--/ZQSCR-->
+  </Window.Resources>
   <Border Background='#202024' BorderBrush='#3A3A44' BorderThickness='1' CornerRadius='10' Padding='18' Margin='10'>
     <StackPanel>
       <TextBlock Text='⬇ atualização disponível' Foreground='#E8E8EC' FontSize='15' FontWeight='Bold'/>
