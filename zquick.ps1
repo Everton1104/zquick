@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # ZQuick — caixa de pesquisa rápida (LLM) residente, estilo Copilot Quick View.
 #   Compativel com Windows PowerShell 5.1 (para virar exe via PS2EXE) e pwsh 7+.
 #   Uso:  powershell -STA -File zquick.ps1 [-Hidden]     (ou zquick.exe gerado)
@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.23'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.23.1'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -213,7 +213,12 @@ function Update-ThemeLive($changes) {
             [System.Windows.Controls.Primitives.TextBoxBase]::CaretBrushProperty,
             [System.Windows.Documents.TextElement]::ForegroundProperty,
             [System.Windows.Shapes.Shape]::FillProperty,
-            [System.Windows.Shapes.Shape]::StrokeProperty
+            [System.Windows.Shapes.Shape]::StrokeProperty,
+            # v3.23.1: Border/Panel NAO sao Control — sem estes, ConfirmBar/PlanBar/
+            # AskBar/QueueBar (bg literal) e o DropBd do dropdown ficavam no tema antigo
+            [System.Windows.Controls.Border]::BackgroundProperty,
+            [System.Windows.Controls.Border]::BorderBrushProperty,
+            [System.Windows.Controls.Panel]::BackgroundProperty
         )
         $stack = [System.Collections.Stack]::new()
         $roots = @($window)
@@ -285,9 +290,13 @@ function Update-TrayIcon {
         $wb.Dispose(); $g.Dispose()
         $ico = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
         $bmp.Dispose()
-        if ($script:trayIcon) { try { $script:trayIcon.Dispose() } catch {} }
+        $oldIco = $script:trayIcon
         $script:trayIcon = $ico
-        if ($notify) { $notify.Icon = $ico }
+        if ($notify) { try { $notify.Icon = $ico } catch {} }
+        # v3.23.1: descarta o antigo SO DEPOIS de trocar — antes disso o notify
+        # apontava pra um HICON destruido (janela de icone em branco na bandeja)
+        if ($oldIco) { try { $oldIco.Dispose() } catch {} }
+        Log ('trayicon: redesenhada (trayA=' + [string]$T.trayA + ')')
     } catch { Log "trayicon: $_" }
 }
 function Save-Config {
@@ -3202,7 +3211,8 @@ function Finish-Turn {
     # tool plan) e o turno fechou "mudo"? Oferece o mesmo botão de aprovação;
     # aprovar envia a execução já isenta (pendingPlanOk). Com fila pendente não
     # abre (o despacho da fila leva a vez — ver tick abaixo).
-    if (-not $script:planGateSeen -and @($script:queuedMsgs).Count -eq 0) {
+    # v3.23.1: -not stopped — resposta truncada por ⏹ nao ganha barra de plano
+    if (-not $script:planGateSeen -and -not $script:stopped -and @($script:queuedMsgs).Count -eq 0) {
         $tp = Test-TextPlan $script:lastAnswer
         if ($tp) { Show-TextPlanBar $tp }
     }
@@ -4658,7 +4668,9 @@ function Show-Settings {
                     # repaint por cor-antiga nao alcanca; re-chama os setters deles
                     Set-TopBtnVisual ([bool]$cfg.alwaysOnTop)
                     Set-PassBtnVisual ([bool]$cfg.passthrough)
-                    if ($chg.ContainsKey($oldT['trayA']) -or $chg.ContainsKey($oldT['trayB'])) { Update-TrayIcon }
+                    # v3.23.1: trayA/trayB ficaram FORA do $chg (colisao do matrix) —
+                    # o gate via ContainsKey nunca disparava; compara os valores direto
+                    if ($oldT['trayA'] -cne ([string]$T.trayA).ToUpper() -or $oldT['trayB'] -cne ([string]$T.trayB).ToUpper()) { Update-TrayIcon }
                     $paints = Update-ThemeLive $chg
                     if ($chg.Count -gt 0) { Log ('tema: ' + $paints + ' pintura(s) ao vivo em ' + $chg.Count + ' cor(es) trocada(s)') }
                 } catch { Log "themelive-apply: $_" }
@@ -5461,7 +5473,10 @@ $PlanNo.Add_Click({
     } else {
         if ($script:engine) { $script:engine.PlanDecide([int]$script:planId, $false) }
         Hide-PlanBar; $StatusText.Text = 'plano rejeitado'
-        Log 'plano: rejeitado'
+        # v3.23.1: o sysPrompt manda o modelo repropor o plano ajustado como TEXTO —
+        # sem resetar o gate a barra de aprovacao textual nunca apareceria
+        $script:planGateSeen = $false
+        Log 'plano: rejeitado (gate textual liberado p/ reproposta)'
     }
 })
 

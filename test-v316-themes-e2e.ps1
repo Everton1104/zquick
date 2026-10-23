@@ -30,7 +30,9 @@ function Wait-Log([string]$pat, [int]$mark, [int]$secs) {
     }
     return $null
 }
-$procId = (Get-Process zquick | Select-Object -First 1).Id
+# instancia dev (pwsh -File zquick.ps1); o zquick.exe instalado pode estar em versao antiga
+$procId = (Get-CimInstance Win32_Process -Filter "Name like 'pwsh%'" | Where-Object { $_.CommandLine -like '*zquick.ps1*' } | Select-Object -First 1).ProcessId
+if (-not $procId) { throw 'processo zquick dev nao achado (pwsh rodando zquick.ps1?)' }
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $pcond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $procId)
 function Find-Wins {
@@ -189,7 +191,7 @@ if ((Get-Status $sw) -notmatch 'embutido') { throw 'apagar embutido nao foi recu
 Set-Val $h0 $v0
 $null = Invoke-ById $sw 'SetClose'
 Start-Sleep -Milliseconds 500
-if (-not (Get-Process zquick -ErrorAction SilentlyContinue)) { throw 'processo morreu' }
+if (-not (Get-CimInstance Win32_Process -Filter "Name like 'pwsh%'" | Where-Object { $_.CommandLine -like '*zquick.ps1*' })) { throw 'processo morreu' }
 if ((Read-New $mark0) -match 'FATAL') { throw 'FATAL no log' }
 'app vivo, sem FATAL'
 "VERDICTO: OK (temas salvar/aplicar/apagar + reset por cor + fechamento limpo)"
