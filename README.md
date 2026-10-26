@@ -19,8 +19,12 @@ Funciona com qualquer provedor de LLM compatível com a **API Anthropic**
 
 1. Baixe o `ZQuick-x.y.z.msi` da página de **releases** e dê dois cliques.
    Instala por usuário (não pede administrador), com assistente em
-   português — no fim, marque **"Iniciar o ZQuick agora"**.
-2. O **assistente de configuração** abre sozinho na primeira execução:
+   português: boas-vindas → **termos de uso** → pasta → **chave da API
+   (opcional)** — cole a chave do provedor aí e o ZQuick já abre
+   funcionando (ele configura o perfil e varre os modelos sozinho). No
+   fim, marque **"Iniciar o ZQuick agora"**.
+2. Deixou a chave em branco? O **assistente de configuração** abre sozinho
+   na primeira execução:
    - **Conexão**: escolha o provedor (Z.ai / Kimi / DeepSeek ou
      🖥 Ollama / 🖥 LM Studio / 🖥 llama.cpp para LLM **local** — chave
      opcional), cole a chave e clique em *Testar conexão* (ele lista os

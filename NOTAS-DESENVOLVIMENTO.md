@@ -116,6 +116,7 @@ imagens.
 | — | v3.24.1 — gate do plano textual só quando o turno usou tools (`turnTools`, mata o falso positivo de resposta didática em passos); fila ✉ só sai depois do envio aceito (`busy`), recusa/exceção não perde a mensagem; estilo da scrollbar em **um** fragmento (`$scrFrag` + marcador `<!--SCRFRAG-->` injetado pelo Theme-Xaml, era copiado 4×) |
 | `57860a8` | v3.25 (Onda 7) — `git_status/diff/log` (repo > `_shCwd` > cwd, valida `.git`) + `git_commit` no GateConfirm; `file_grep` com `mode:"files"/"count"`, `context:0-3` (grupos separados por `--`) e `max:1-200`; `todo_write` + painel 📋 (○ ●accent ✔riscado, `/uitest todo2` cobre o drain; lição: `.clear` em array do ConvertFrom-Json resolve para IList.Clear — PSMethod truthy — checar `-is [PSCustomObject]` antes) |
 | — | v3.26 (Onda 8) — **hooks** (`PreToolUse` exit 2 = nega com motivo no tool_result / exit 0 = aprova por política e pula o GateConfirm (`_hookAllow`), `PostToolUse`/`TurnEnd` async fire-and-forget, payload JSON no stdin via Task, 20s timeout fail-open); **slash commands** (`commands\nome.md` → `/nome args`, `$ARGUMENTS`, aninhamento ≤3, desconhecido avisa e **return** — o `break` sozinho caía no envio); **fallback de modelo** (cadeia model → fast → big → `modelFallback` do json, dedupe; após esgotar as 4 tentativas troca `fbIdx`/`_modelSave` e reconstrói o body, `CurModel` restaurado no finally) |
+| — | v3.26 (parte 2 — pedidos do teste do instalador) — **moldura estreita**: ▢/▢✕/✕ num `StackPanel` próprio dockado à direita do painel externo (barra de título vira `WrapPanel` sem os botões — não somem mais quando a janela encolhe); **licença de verdade** no MSI (`kit\licenca.rtf` renderizado no diálogo autoral `ZQLicenseDlg`); **chave da API no instalador** (`ZQKeyDlg` pergunta Base URL + chave → CA imediata empacota `DIR/ZQKEY/ZQBASE` no CustomActionData + CA deferida `ZQWriteSetup` (VBScript, impersonate) grava `zquick.setup` no INSTALLDIR → o app consome no boot: mapeia o perfil do domínio, salva a config, apaga o arquivo e varre os modelos num timer 4s — abre funcionando, sem assistente; a chave nunca vai na linha de comando) |
 
 ## Notas de engenharia (lições)
 
@@ -202,3 +203,52 @@ imagens.
   `HooksJson` montado no PS 5.1 precisam do path com barras dobradas,
   senão o `MJ.Parse` falha e os hooks ligam "desligados" (o sintoma é o
   GateConfirm abrir normal, sem erro).
+- **WiX: o último `NewDialog` verdadeiro vence** — empatar a Order com o
+  default do WixUI perde; publicar com Order acima (6 contra 4, 3
+  contra 1) e provar com uma sonda que anda pelo diálogo
+  (`dist\obj\dump-msi4.ps1` usa o Voltar para revelar a regra).
+- **`WixUILicenseRtf` não substituiu o lorem** — nem como `<Property>`
+  no wxs nem como string loc no `.wxl` o RTF chegou ao diálogo; a saída
+  determinística foi diálogo AUTORAL (`ZQLicenseDlg`) com o RTF inline
+  (uma linha, escapado `&amp;`/`&lt;`/`&quot;`) no `Text` do
+  `ScrollableText`. E o símbolo `CheckBox:` é keyado pela PROPERTY
+  ligada — checkbox próprio com `LicenseAccepted` colide com o do WixUI
+  (`LGHT0091`) → `ZQLicenseAccepted`.
+- **SQL do MSI (WindowsInstaller COM)**: as colunas `Control` e
+  `Property` da tabela Control NÃO têm underscore (o underscore mora
+  nas FK de outras tabelas: `Dialog_`/`Control_` do ControlEvent);
+  `Property/@Value` vazio é erro de candle (`CNDL0006`) — propriedade
+  preenchida em runtime é declarada com `Secure='yes'`.
+- **Automatizar msiexec (basic UI) é Win32, não UIA**: os controles
+  aparecem como `Pane` SEM nenhum pattern (botões owner-drawn; sem
+  `Invoke`; `LegacyIAccessiblePattern` não existe no managed) — clicar
+  é `BM_CLICK` direto no hwnd; os campos de texto são
+  **`RichEdit20W`**, não `Edit` (`GetWindowText` falha cross-process —
+  `WM_GETTEXT`/`WM_SETTEXT` com StringBuilder funcionam); checkbox do
+  MSI nasce `BS_CHECKBOX` (2), não autobox (3); `FindWindow`/
+  `FindWindowEx` retornam 0 mesmo com título e classe certos —
+  `EnumWindows`/`EnumChildWindows` com delegates acham tudo.
+  **Preencher o campo exige a dança de foco**: o Edit do MSI só
+  comita o texto na PROPERTY quando o RichEdit **tem foco** (só
+  notifica `EN_CHANGE` ao diálogo nesse estado) — `WM_SETFOCUS` →
+  `WM_SETTEXT` → `WM_KILLFOCUS` e a property sincroniza; sem o
+  `WM_SETFOCUS` o texto aparece no campo, mas a property fica vazia e
+  a CA via a `ZQKEY` vazia, nem gravando o `zquick.setup` (`WM_CHAR`
+  caractere a caractere também não resolve; oráculo barato: Back →
+  Next — o campo volta vazio se a property nunca recebeu o texto).
+  E o assert de consumo tem que exigir que o arquivo **existiu**
+  (flag `$seenSetup` durante a instalação) antes de exigir que sumiu.
+- **Helper de teste que `Pass`a/`Fail`a pelo pipeline envenena o
+  retorno das funções**: `if (-not (Click-Btn …))` via o `Array` de
+  saída (`"FAIL: …" + $false`) como truthy e o fallback nunca rodava —
+  e `[void](Click-Btn …)` engolia a mensagem sem ninguém ver.
+  `Pass`/`Fail` do E2E escrevem com `[Console]::WriteLine` (efeito
+  colateral puro, retorno limpo).
+- **Botões do WixUI ficam em INGLÊS na cultura pt-BR** — VerifyReady e
+  ExitDialog mostram `&Install`/`&Finish` (só título e descrição
+  localizam); os diálogos autorais do wxs exibem o texto próprio
+  pt-BR. Pattern de clique tem que cobrir os dois (`*Instalar*` com
+  fallback `*Install*`) — foi o FAIL do 1º E2E do 3.26: clicou nada e
+  o instalador ficou parado no resumo até o timeout.
+- PS 5.1: **função chamada `Where` colide com o alias** `where` —
+  silencia (não roda e não erroa); renomear.

@@ -95,6 +95,7 @@ function Reload-Config {
     } catch { Log "config invalido, usando defaults: $_" }
 }
 Reload-Config
+
 # ---------- escala global de fonte: answerFontSize 13 = 100% (multiplica a interface TODA) ----------
 $script:fscale = 1.0
 try {
@@ -3021,19 +3022,27 @@ $xamlStr = @'
   <DockPanel>
     <Border DockPanel.Dock="Top" Padding="14,10,14,8">
       <DockPanel>
-        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-          <ComboBox x:Name="ProfileBox" Width="110" FontSize="12" VerticalContentAlignment="Center" ToolTip="Perfil / provedor LLM" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <ComboBox x:Name="ModelBox" Width="135" FontSize="12" Margin="8,0,0,0" VerticalContentAlignment="Center" ToolTip="Modelo" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <Button x:Name="TopBtn" Content="📌" Margin="8,0,0,0" ToolTip="sempre no topo — manter a janela sobre as outras" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <Button x:Name="PassBtn" Content="⚡" Margin="8,0,0,0" ToolTip="passthrough — aprovar ações (edits/comandos) sem confirmar; clica AQUI para ligar/desligar" WindowChrome.IsHitTestVisibleInChrome="True"/>
-          <Button x:Name="SettingsBtn" Content="⚙" Margin="14,0,0,0" ToolTip="Configurações — chaves, janela, aparência, geral" Style="{StaticResource ChromeBtn}"/>
+        <!-- botoes da moldura ficam SEMPRE visiveis (dock externo a direita):
+             a toolbar e' mais larga que a janela minima e antes clipava
+             Min/Max/Close fora da tela -->
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+          <Button x:Name="SettingsBtn" Content="⚙" ToolTip="Configurações — chaves, janela, aparência, geral" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MinBtn" Content="—" ToolTip="ocultar na bandeja (Alt+Q traz de volta)" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="MaxBtn" Content="▢" ToolTip="maximizar / restaurar" Style="{StaticResource ChromeBtn}"/>
           <Button x:Name="CloseBtn" Content="✕" ToolTip="ocultar na bandeja (sair de verdade: ícone Z → Sair)" Style="{StaticResource ChromeBtn}"/>
         </StackPanel>
-        <TextBlock x:Name="LogoText" Text="⚡ ZQuick" FontSize="15" FontWeight="SemiBold" Foreground="#E8E8EC" VerticalAlignment="Center"/>
+        <DockPanel>
+          <TextBlock x:Name="LogoText" DockPanel.Dock="Left" Text="⚡ ZQuick" FontSize="15" FontWeight="SemiBold" Foreground="#E8E8EC" VerticalAlignment="Center"/>
+          <!-- toolbar quebra linha quando a janela e' estreita (WrapPanel) -->
+          <WrapPanel HorizontalAlignment="Right">
+            <ComboBox x:Name="ProfileBox" Width="110" FontSize="12" VerticalContentAlignment="Center" ToolTip="Perfil / provedor LLM" WindowChrome.IsHitTestVisibleInChrome="True"/>
+            <ComboBox x:Name="ModelBox" Width="135" FontSize="12" Margin="8,0,0,0" VerticalContentAlignment="Center" ToolTip="Modelo" WindowChrome.IsHitTestVisibleInChrome="True"/>
+            <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
+            <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
+            <Button x:Name="TopBtn" Content="📌" Margin="8,0,0,0" ToolTip="sempre no topo — manter a janela sobre as outras" WindowChrome.IsHitTestVisibleInChrome="True"/>
+            <Button x:Name="PassBtn" Content="⚡" Margin="8,0,0,0" ToolTip="passthrough — aprovar ações (edits/comandos) sem confirmar; clica AQUI para ligar/desligar" WindowChrome.IsHitTestVisibleInChrome="True"/>
+          </WrapPanel>
+        </DockPanel>
       </DockPanel>
     </Border>
     <Border DockPanel.Dock="Bottom">
@@ -6975,6 +6984,52 @@ $timer.Start()
 $app = [System.Windows.Application]::new()
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
 
+# v3.26: zquick.setup — chave informada NO INSTALADOR (MSI pergunta base+chave
+# e grava aqui; a CA roda depois dos arquivos). Consome agora, ANTES do
+# ContentRendered abaixo, para o assistente de 1ª execução não abrir: cria/
+# atualiza o perfil, persiste a chave, agenda a varredura de modelos e APAGA
+# o arquivo (a chave mora só no zquick.json). Roda aqui porque Set-CfgProp/
+# Save-Config/Update-ModelBox já existem nesta altura.
+$script:zqScanModels = $false
+$setupF = Join-Path $appDir 'zquick.setup'
+if (Test-Path -LiteralPath $setupF) {
+    try {
+        $sBase = ''; $sKey = ''
+        foreach ($sl in @(Get-Content -LiteralPath $setupF)) {
+            if ($sl -like 'base=*') { $sBase = $sl.Substring(5).Trim() }
+            elseif ($sl -like 'key=*') { $sKey = $sl.Substring(4).Trim() }
+        }
+        if ($sKey) {
+            if (-not $sBase) { $sBase = 'api.z.ai/api/anthropic' }
+            if ($sBase -notmatch '^https?://') { $sBase = 'https://' + $sBase }
+            $sBase = $sBase.TrimEnd('/')
+            $pname = if ($sBase -match 'z\.ai') { 'zai' }
+                     elseif ($sBase -match 'moonshot|kimi') { 'kimi' }
+                     elseif ($sBase -match 'deepseek') { 'deepseek' }
+                     elseif ($sBase -match 'minimax') { 'minimax' }
+                     elseif ($sBase -match 'dashscope|qwen') { 'qwen' }
+                     elseif ($sBase -match 'localhost|127\.') { 'local' }
+                     else { 'custom' }
+            if (-not $cfg.profiles.$pname) {
+                # endpoint não reconhecido → perfil próprio (não sobrescreve existente)
+                $n2 = $pname; $i = 2
+                while ($cfg.profiles.$n2) { $n2 = $pname + $i; $i++ }
+                Set-CfgProp $cfg.profiles $n2 ([pscustomobject]@{ label = ($sBase -replace '^https?://','') })
+                $pname = $n2
+            }
+            $p = $cfg.profiles.$pname
+            Set-CfgProp $p 'baseUrl' $sBase
+            Set-CfgProp $p 'apiKey' $sKey
+            $cfg.profile = $pname
+            Save-Config           # persiste já — se a varredura falhar, a chave está salva
+            Update-ModelBox
+            $script:zqScanModels = $true
+            Log ("setup: perfil {0} configurado pelo instalador (base {1})" -f $pname, $sBase)
+        }
+    } catch { Log "setup: erro lendo zquick.setup: $_" }
+    try { Remove-Item -LiteralPath $setupF -Force } catch {}
+}
+
 # v3.20: atualização automática — limpa a sobra da atualização anterior (.old) e
 # agenda a consulta ao GitHub p/ 20s depois de abrir (máx. 1x/20h; cfg.checkUpdates)
 try {
@@ -6988,6 +7043,39 @@ $updTimer.Add_Tick({
     try { Invoke-UpdateCheck 'auto' } catch { Log ('update(auto): ' + $_.Exception.Message) }
 })
 $updTimer.Start()
+
+# v3.26: varredura de modelos na configuração via instalador — 4s depois do
+# boot consulta GET /v1/models do provedor, preenche a lista do perfil com ⭐
+# (maior modelo "cheio") e deixa o app pronto sem abrir assistente nenhum.
+if ($script:zqScanModels) {
+    $scanTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $scanTimer.Interval = [timespan]::FromSeconds(4)
+    $scanTimer.Add_Tick({
+        try { $scanTimer.Stop() } catch {}
+        try {
+            $p = Get-ActiveProfile
+            $auth = Resolve-ProfileAuth $p
+            Log ("setup: varrendo modelos em {0}…" -f $auth.base)
+            [void]$window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+            $r = Invoke-RestMethod -Method Get -Uri ($auth.base.TrimEnd('/') + '/v1/models') `
+                 -Headers @{ 'x-api-key' = $auth.key; 'anthropic-version' = '2023-06-01' } -TimeoutSec 25
+            $ids = @($r.data | ForEach-Object { [string]$_.id } | Where-Object { $_ })
+            if ($ids.Count) {
+                $rec = @($ids | Where-Object { $_ -notmatch '(?i)flash|turbo|air|mini|lite|preview|thinking' } |
+                    Sort-Object { $v = ($_ -replace '[^0-9.]','').Trim('.'); try { [version]$v } catch { [version]'0.0' } })[-1]
+                $flash = @($ids | Where-Object { $_ -match '(?i)flash' } | Select-Object -First 1)
+                Set-CfgProp $p 'models' (@('auto') + $ids)
+                if ($flash) { Set-CfgProp $p 'fastModel' $flash }
+                if ($rec)   { Set-CfgProp $p 'bigModel' $rec }
+                Save-Config
+                Update-ModelBox
+                $StatusText.Text = $(if ($rec) { "✔ pronto: $($ids.Count) modelos — ⭐ $rec" } else { "✔ pronto: $($ids.Count) modelos" })
+                Log ("setup: {0} modelos varridos{1} — app pronto" -f $ids.Count, $(if ($rec) { " — ⭐ $rec" } else { '' }))
+            } else { Log 'setup: varredura voltou sem modelos' }
+        } catch { Log ('setup: varredura de modelos falhou: ' + $_.Exception.Message) }
+    })
+    $scanTimer.Start()
+}
 
 # v3.19: 1a execucao sem chave nenhuma -> assistente de configuracao abre sozinho
 # (assim que a janela pinta; instalador nao precisa mais abrir o json no Bloco de Notas)

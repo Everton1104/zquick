@@ -15,12 +15,18 @@ INSTALAÇÃO
   MSI (recomendado): dois cliques em ZQuick-x.y.z.msi. Instala por
   USUÁRIO — não pede administrador — em %LOCALAPPDATA%\Programs\
   ZQuick, com atalho no Menu Iniciar e pergunta se já abre o
-  assistente. (SmartScreen: "Mais informações" → "Executar assim
+  assistente. No meio do caminho: termos de uso e a tela opcional
+  "Chave da API" — cole a chave aí (Z.ai, Kimi, DeepSeek, MiniMax,
+  Qwen, LLM local...) e o ZQuick já abre FUNCIONANDO: ele grava o
+  perfil, testa e varre os modelos do provedor sozinho. Sem chave?
+  Siga em frente que o assistente da primeira execução cuida disso.
+  (SmartScreen: "Mais informações" → "Executar assim
   mesmo" — binário sem assinatura digital.)
   Ou por pasta: copie a pasta do kit e dê dois cliques em
   INSTALAR.cmd (mesmo destino, sem atalho no Menu Iniciar).
 
-PRIMEIRO USO — o assistente abre sozinho
+PRIMEIRO USO — o assistente abre sozinho (só se você não digitou
+chave no instalador; se digitou, está pronto)
   1. CONEXÃO: escolha o provedor (Z.ai, Kimi, DeepSeek — ou um LLM
      LOCAL: 🖥 Ollama / 🖥 LM Studio / 🖥 llama.cpp com o servidor
      rodando), cole a chave da API (Z.ai: z.ai → API Keys; local
