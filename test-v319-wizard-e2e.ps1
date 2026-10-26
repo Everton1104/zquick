@@ -104,7 +104,7 @@ $null = Invoke-ById $sw 'SetWiz'
 $wz = $null; $dl = (Get-Date).AddSeconds(8)
 while ((Get-Date) -lt $dl -and -not $wz) {
     Start-Sleep -Milliseconds 400
-    $wz = Find-Wins | Where-Object { $_.Current.Name -like '*assistente*' } | Select-Object -First 1
+    $wz = Find-Wins | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Window -and $_.Current.Name -like '*assistente*' } | Select-Object -First 1
 }
 if (-not $wz) { throw 'wizard nao abriu' }
 'wizard aberto'
@@ -162,7 +162,9 @@ $null = Invoke-ById $wz 'WzFinish'
 if (-not (Wait-Log 'wizard: configurado' $mark0 20)) { throw 'nao logou wizard: configurado' }
 $dl = (Get-Date).AddSeconds(12)
 while ((Get-Date) -lt $dl) {
-    $still = Find-Wins | Where-Object { $_.Current.Name -like '*assistente*' } | Select-Object -First 1
+    # so JANELAS: o status '✔ configurado pelo assistente' (Wz-Finish grava) e'
+    # um filho da janela principal e casava com '*assistente*' por 12s
+    $still = Find-Wins | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Window -and $_.Current.Name -like '*assistente*' } | Select-Object -First 1
     if (-not $still) { break }
     Start-Sleep -Milliseconds 500
 }

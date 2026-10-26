@@ -3,7 +3,9 @@
 # oferece o mesmo botão ✅ Aprovar; aprovar envia um novo turno JÁ ISENTO de
 # confirmações individuais (_planOk via Ask 6º arg).
 #   Fase A (sem modelo): /uitest plantext -> barra aparece -> PlanNo dispensa.
-#   Fase B (real): pedir plano POR ESCRITO -> 'plano-texto: botão de aprovação' ->
+#   Fase B (real, v3.24.1): turno 1 USA uma tool de leitura (file_list) e escreve
+#     o plano como TEXTO -> 'plano-texto: botão de aprovação' (o gate novo exige
+#     tools no turno — resposta didática sem tool não ganha barra) ->
 #     PlanYes -> 'envio:' com PLANO APROVADO -> turno 2 sem 'confirma:' e com
 #     '✅ plano:' (isenção em lote) -> pastas zq-tp1/2/3 + nota.txt existem.
 #   Requer passthrough OFF (senão GateConfirm aprova tudo e a isenção não é provada) —
@@ -129,12 +131,15 @@ try {
     if (-not (Wait-Log $mark 'plano-texto: dispensado' 10)) { throw "fase A: PlanNo nao dispensou. log: $(Read-New $mark)" }
     "PASS fase A: barra textual aparece e PlanNo dispensa"
 
-    # ---- FASE B: modelo REAL escreve plano como texto -> aprovar -> lote isento ----
+    # ---- FASE B: turno com TOOL + plano em texto -> aprovar -> lote isento ----
+    # v3.24.1: o gate da barra textual exige tools EXECUTADAS no turno — então o
+    # pedido manda listar a Desktop (leitura livre) ANTES de escrever o plano
     $mark = (Read-LogText).Length
-    Send-Line $w 'NÃO use a ferramenta plan nem nenhuma outra ferramenta e não execute nada ainda. Escreva DIRETO NO TEXTO DA RESPOSTA um plano numerado (1. 2. 3.) com exatamente 3 passos para criar na minha Desktop as pastas zq-tp1, zq-tp2 e zq-tp3, cada uma com um arquivo nota.txt dentro (conteúdos: tp ok 1, tp ok 2, tp ok 3). Escreva o plano como texto e PARE.'
+    Send-Line $w 'Primeiro use a ferramenta file_list para listar os arquivos da minha Desktop (só isso, não execute mais nada). Depois, DIRETO NO TEXTO DA RESPOSTA, escreva um plano numerado (1. 2. 3.) com exatamente 3 passos para criar na minha Desktop as pastas zq-tp1, zq-tp2 e zq-tp3, cada uma com um arquivo nota.txt dentro (conteúdos: tp ok 1, tp ok 2, tp ok 3). Não use a ferramenta plan, não execute os passos — escreva o plano como texto e PARE.'
     $first = Wait-Log $mark 'respondido: ' 120
     if (-not $first) { throw "fase B: turno 1 nao fechou. log: $(Read-New $mark)" }
     if ($first -match 'plano: .+\(\d+ passos?\)') { throw "fase B: modelo usou tool plan apesar do pedido. log: $first" }
+    Assert ($first -match 'tool: ') 'turno 1 nao executou tool (gate novo exige para a barra textual)' $first
     if (-not (Wait-Log $mark 'plano-texto: botão de aprovação oferecido \(\d+ passos\)' 15)) { throw "fase B: deteccao de plano textual nao disparou. log: $(Read-New $mark)" }
     $py = Find-ById $w 'PlanYes'
     Assert ($null -ne $py) 'fase B: PlanYes nao encontrado' ''

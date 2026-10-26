@@ -3537,10 +3537,11 @@ function Send-Current {
         $InputBox.Clear()
         try {
             function Hex-Of($b) { if ($b -is [System.Windows.Media.SolidColorBrush]) { '#' + $b.Color.ToString().Substring(3, 6).ToUpper() } else { 'n/a' } }
-            Log ('themeprobe: win bg={0}; AnswerView bg={1}; setSW={2}; logo fg={3}; NewBtn bg={4}/fg={5}; ProfileBox bg={6}/fg={7}; TopBtn bg={8}/fg={9}; PassBtn bg={10}/fg={11}' -f `
+            Log ('themeprobe: win bg={0}; AnswerView bg={1}; setSW={2}; logo fg={3}; NewBtn bg={4}/fg={5}; ProfileBox bg={6}/fg={7}; TopBtn bg={8}/fg={9}; PassBtn bg={10}/fg={11}; SendBtn bg={12}/fg={13}' -f `
                 (Hex-Of $window.Background), (Hex-Of $AnswerView.Background), $(if ($setSW -and $setSW.IsVisible) { (Hex-Of $setSW.Background) } else { 'fechado' }), `
                 (Hex-Of $LogoText.Foreground), (Hex-Of $NewBtn.Background), (Hex-Of $NewBtn.Foreground), (Hex-Of $ProfileBox.Background), (Hex-Of $ProfileBox.Foreground), `
-                (Hex-Of $TopBtn.Background), (Hex-Of $TopBtn.Foreground), (Hex-Of $PassBtn.Background), (Hex-Of $PassBtn.Foreground))
+                (Hex-Of $TopBtn.Background), (Hex-Of $TopBtn.Foreground), (Hex-Of $PassBtn.Background), (Hex-Of $PassBtn.Foreground), `
+                (Hex-Of $SendBtn.Background), (Hex-Of $SendBtn.Foreground))   # v3.24.1: SendBtn = estilo implicito, prove que o walk alcanca
             $StatusText.Text = 'themeprobe logado'
         } catch { Log "themeprobe erro: $_" }
         return

@@ -4,7 +4,7 @@
 # brush cor-antiga→cor-nova + Update-ComboItemStyle + Update-TrayIcon.
 #   1. themeprobe baseline (logo fg, NewBtn bg/fg, ProfileBox bg/fg)
 #   2. ⚙→Aparência: sentinéis em fg (#FFB300), panel (#5C3A00), input (#26313B)
-#      → Aplicar → log 'config: aplicado' + 'repintada(s) ao vivo' → fecha
+#      → Aplicar → log 'config: aplicado' + 'pintura(s) ao vivo' → fecha
 #   3. themeprobe SEM reiniciar → tudo com as sentinelas (logo fg, botão, combo)
 #   4. restaura as 3 cores originais → themeprobe volta ao baseline
 # Rodar com: pwsh -STA -File test-repaint-ui.ps1   (app dev rodando)
@@ -96,8 +96,8 @@ function Get-ThemeProbe([int]$procId, [hashtable]$wref) {
     $hit = Wait-Log $mark 'themeprobe: ' 15
     if (-not $hit) { throw "themeprobe nao logou. log: $((Read-LogText).Substring($mark))" }
     $line = ($hit -split "`n" | Where-Object { $_ -match 'themeprobe' } | Select-Object -Last 1)
-    if ($line -notmatch 'win bg=(#[0-9A-F]{6}); AnswerView bg=(#[0-9A-F]{6}|n/a); setSW=(#[0-9A-F]{6}|fechado|n/a); logo fg=(#[0-9A-F]{6}); NewBtn bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6}); ProfileBox bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6}); TopBtn bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6}); PassBtn bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6})') { throw "themeprobe fora do formato: $line" }
-    return @{ win = $Matches[1]; logo = $Matches[4]; btnBg = $Matches[5]; btnFg = $Matches[6]; cbBg = $Matches[7]; cbFg = $Matches[8]; topBg = $Matches[9]; topFg = $Matches[10]; passBg = $Matches[11]; passFg = $Matches[12]; line = $line }
+    if ($line -notmatch 'win bg=(#[0-9A-F]{6}); AnswerView bg=(#[0-9A-F]{6}|n/a); setSW=(#[0-9A-F]{6}|fechado|n/a); logo fg=(#[0-9A-F]{6}); NewBtn bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6}); ProfileBox bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6}); TopBtn bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6}); PassBtn bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6}); SendBtn bg=(#[0-9A-F]{6})/fg=(#[0-9A-F]{6})') { throw "themeprobe fora do formato: $line" }
+    return @{ win = $Matches[1]; logo = $Matches[4]; btnBg = $Matches[5]; btnFg = $Matches[6]; cbBg = $Matches[7]; cbFg = $Matches[8]; topBg = $Matches[9]; topFg = $Matches[10]; passBg = $Matches[11]; passFg = $Matches[12]; sendBg = $Matches[13]; sendFg = $Matches[14]; line = $line }
 }
 function Assert([bool]$cond, [string]$msg, [string]$ctx) { if (-not $cond) { throw "FALHOU: $msg | $ctx" } }
 
@@ -120,7 +120,8 @@ try {
     # ---- 1. baseline ----
     $base = Get-ThemeProbe $app.ProcessId $wref
     "baseline: $($base.line)"
-    Assert ($base.logo -ne '#FFB300') 'sentinela fg ja presente no tema (troque as sentinelas do teste)' $base.line
+    # sentinelas sao DINAMICAS (escolhidas mais abaixo, contra os hex vivos do ⚙):
+    # o tema do usuario pode ser qualquer paleta — inclusive as antigas fixas daqui
 
     # ---- 2. sentinelas no ⚙ ----
     $null = Invoke-ById $w 'SettingsBtn'
@@ -142,33 +143,48 @@ try {
     $oldInput = $hexEdits[3].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
     $oldFg    = $hexEdits[5].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
     $oldAccent = $hexEdits[9].GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
-    Set-Val $hexEdits[2] '#5C3A00'
-    Set-Val $hexEdits[3] '#26313B'
-    Set-Val $hexEdits[5] '#FFB300'
-    Set-Val $hexEdits[9] '#E0559C'
+    # sentinelas dinamicas: 4 cores FORA do tema vivo (o salvo pode ate repetir as
+    # antigas fixas #5C3A00/#26313B/#FFB300/#E0559C — ja aconteceu com tema do usuario)
+    $cur = @($hexEdits | ForEach-Object { $_.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value.ToUpper() })
+    $pool = @('#7F1D1D','#0F766E','#4C1D95','#B45309','#065F46','#9D174D','#1E3A8A','#713F12')
+    $pick = @(); foreach ($h in $pool) { if ($cur -notcontains $h) { $pick += $h }; if ($pick.Count -ge 4) { break } }
+    if ($pick.Count -lt 4) { throw 'nao achei 4 sentinelas fora do tema vivo (tema exotico?)' }
+    $newPanel, $newInput, $newFg, $newAcc = $pick[0], $pick[1], $pick[2], $pick[3]
+    # fg esperado dos 📌/⚡ ATIVOS: mesma regra do app (Get-ContrastFgHex — lum > 140 = preto)
+    $lum = [math]::Round(0.299*[Convert]::ToInt32($newAcc.Substring(1,2),16) + 0.587*[Convert]::ToInt32($newAcc.Substring(3,2),16) + 0.114*[Convert]::ToInt32($newAcc.Substring(5,2),16))
+    $accContrast = if ($lum -gt 140) { '#000000' } else { '#FFFFFF' }
+    "sentinelas: panel=$newPanel input=$newInput fg=$newFg accent=$newAcc (contraste do accent: $accContrast)"
+    Set-Val $hexEdits[2] $newPanel
+    Set-Val $hexEdits[3] $newInput
+    Set-Val $hexEdits[5] $newFg
+    Set-Val $hexEdits[9] $newAcc
     $mark = (Read-LogText).Length
     $null = Invoke-ById $sw 'SetApply'
     $hit = Wait-Log $mark 'config: aplicado' 15
     if (-not $hit) { throw "Aplicar nao logou. log: $((Read-LogText).Substring($mark))" }
-    if (-not (Wait-Log $mark 'repintada\(s\) ao vivo' 10)) { throw "repaint ao vivo nao logou. log: $((Read-LogText).Substring($mark))" }
+    if (-not (Wait-Log $mark 'pintura\(s\) ao vivo' 10)) { throw "repaint ao vivo nao logou. log: $((Read-LogText).Substring($mark))" }
     $null = Invoke-ById $sw 'SetClose'
     Start-Sleep -Milliseconds 500
-    Assert (Get-CimInstance Win32_Process -Filter "Name like 'pwsh%'" | Where-Object { $_.CommandLine -like '*zquick.ps1*' }) 'processo morreu apos fechar o ⚙' ''
+    Assert (@(Get-CimInstance Win32_Process -Filter "Name like 'pwsh%'" | Where-Object { $_.CommandLine -like '*zquick.ps1*' }).Count -gt 0) 'processo morreu apos fechar o ⚙' ''
     'sentinelas aplicadas, ⚙ fechado sem crash'
 
     # ---- 3. themeprobe SEM reiniciar: tudo repintado? ----
     $after = Get-ThemeProbe $app.ProcessId $wref
     "apos apply: $($after.line)"
-    Assert ($after.logo -eq '#FFB300') "logo nao repintou (fg): $($after.logo)" $after.line
-    Assert ($after.btnBg -eq '#5C3A00') "botao nao repintou (panel): $($after.btnBg)" $after.line
-    Assert ($after.btnFg -eq '#FFB300') "texto do botao nao repintou (fg): $($after.btnFg)" $after.line
-    Assert ($after.cbBg -eq '#26313B') "combo nao repintou (input): $($after.cbBg)" $after.line
-    Assert ($after.cbFg -eq '#FFB300') "texto do combo nao repintou (fg): $($after.cbFg)" $after.line
-    # 📌/⚡: pintados POR CODIGO — ativos = accent (#E0559C, contraste branco), inativos = panel/fg
-    $expTopBg  = $(if ($topOn)  { '#E0559C' } else { '#5C3A00' })
-    $expPassBg = $(if ($passOn) { '#E0559C' } else { '#5C3A00' })
-    $expTopFg  = $(if ($topOn)  { '#FFFFFF' } else { '#FFB300' })
-    $expPassFg = $(if ($passOn) { '#FFFFFF' } else { '#FFB300' })
+    Assert ($after.logo -eq $newFg) "logo nao repintou (fg): $($after.logo)" $after.line
+    Assert ($after.btnBg -eq $newPanel) "botao nao repintou (panel): $($after.btnBg)" $after.line
+    Assert ($after.btnFg -eq $newFg) "texto do botao nao repintou (fg): $($after.btnFg)" $after.line
+    Assert ($after.cbBg -eq $newInput) "combo nao repintou (input): $($after.cbBg)" $after.line
+    Assert ($after.cbFg -eq $newFg) "texto do combo nao repintou (fg): $($after.cbFg)" $after.line
+    # v3.24.1: SendBtn nao tem Background no XAML — pinta pelo estilo IMPLICITO de
+    # Button; o walk le o valor EFETIVO e grava local novo, tem que repintar tambem
+    Assert ($after.sendBg -eq $newPanel) "Enviar (estilo implicito) nao repintou (panel): $($after.sendBg)" $after.line
+    Assert ($after.sendFg -eq $newFg) "Enviar fg nao repintou: $($after.sendFg)" $after.line
+    # 📌/⚡: pintados POR CODIGO — ativos = accent + contraste, inativos = panel/fg
+    $expTopBg  = $(if ($topOn)  { $newAcc } else { $newPanel })
+    $expPassBg = $(if ($passOn) { $newAcc } else { $newPanel })
+    $expTopFg  = $(if ($topOn)  { $accContrast } else { $newFg })
+    $expPassFg = $(if ($passOn) { $accContrast } else { $newFg })
     Assert ($after.topBg -eq $expTopBg) "TopBtn (📌 ativo=$topOn) nao seguiu o tema: $($after.topBg), esperava $expTopBg" $after.line
     Assert ($after.topFg -eq $expTopFg) "TopBtn fg errado: $($after.topFg), esperava $expTopFg" $after.line
     Assert ($after.passBg -eq $expPassBg) "PassBtn (⚡ ativo=$passOn) nao seguiu o tema: $($after.passBg), esperava $expPassBg" $after.line
@@ -200,7 +216,7 @@ try {
     "restaurado: $($back.line)"
     Assert ($back.logo -eq $base.logo -and $back.btnBg -eq $base.btnBg -and $back.cbBg -eq $base.cbBg) 'restauracao nao voltou ao baseline' $back.line
     Assert (-not ((Read-LogText).Substring($mark) -match 'FATAL')) 'FATAL no log' ''
-    Assert (Get-CimInstance Win32_Process -Filter "Name like 'pwsh%'" | Where-Object { $_.CommandLine -like '*zquick.ps1*' }) 'processo morreu no fim' ''
+    Assert (@(Get-CimInstance Win32_Process -Filter "Name like 'pwsh%'" | Where-Object { $_.CommandLine -like '*zquick.ps1*' }).Count -gt 0) 'processo morreu no fim' ''
 
     'VERDICTO: OK (Aplicar repinta logo/botoes/combos ao vivo e restaura limpo)'
 } finally {
