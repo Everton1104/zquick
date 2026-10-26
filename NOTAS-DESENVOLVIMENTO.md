@@ -109,6 +109,7 @@ imagens.
 | `928c728` | v3.10.1 — ⭐ recomendado na lista (estrela só na exibição, `Clean-ModelId` limpa pra API) |
 | (…) | v3.10–v3.23: ver `git log` — compactação E2E, favoritar/renomear histórico, ⧉ copiar resposta, assistente de configuração 4 etapas + MSI + auto-update GitHub, escala/temas/scrollbar temática, repintura ao vivo do ✔ Aplicar (v3.23) |
 | — | v3.24 — assistente com presets de provedor (Z.ai/Kimi/DeepSeek) e **LLM local** (Ollama/LM Studio/llama.cpp, chave opcional, perfil `local`); MSI com UI pt-BR + "Iniciar o ZQuick agora"; LEIA-ME enxuto + MANUAL.txt |
+| — | v3.24.1 — gate do plano textual só quando o turno usou tools (`turnTools`, mata o falso positivo de resposta didática em passos); fila ✉ só sai depois do envio aceito (`busy`), recusa/exceção não perde a mensagem; estilo da scrollbar em **um** fragmento (`$scrFrag` + marcador `<!--SCRFRAG-->` injetado pelo Theme-Xaml, era copiado 4×) |
 
 ## Notas de engenharia (lições)
 

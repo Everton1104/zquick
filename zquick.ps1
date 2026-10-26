@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.24.0'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.24.1'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -128,7 +128,74 @@ if ($cfg.theme) {
 }
 # aplica cores do tema sobre os literais dos XAML (janela + dialogos) antes do parse;
 # v3.8: tambem multiplica todo FontSize="N" pela escala global (13 = 100%)
+# v3.24.1: estilo da scrollbar = UM fragmento (era copiado 4x). Os XAML das janelas
+# carregam so o marcador <!--SCRFRAG--> e Theme-Xaml injeta o bloco ZQSCR no parse.
+$scrFrag = @'
+<!--ZQSCR-->
+    <!-- v3.22: scrollbar FINA no tema (ZQSCR) - um unico fragmento, injetado pelo Theme-Xaml no parse -->
+    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.DecreaseRepeatButton>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
+                    <RepeatButton.Template>
+                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                    </RepeatButton.Template>
+                  </RepeatButton>
+                </Track.IncreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Focusable="False" Margin="1">
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
+                          </Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="Orientation" Value="Horizontal">
+                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                <Setter Property="MinHeight" Value="8"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Vertical">
+          <Setter Property="Width" Value="8"/>
+        </Trigger>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Height" Value="8"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <!--/ZQSCR-->
+'@
+
 function Theme-Xaml([string]$x) {
+    $x = $x.Replace('<!--SCRFRAG-->', $scrFrag)   # v3.24.1: injeta o estilo da scrollbar (copia unica)
+
     # v3.22: scrollbar — 'classic' remove o bloco todo (volta a do Windows);
     # raio do polegar depende do estilo ('pill' arredondado, 'square' reto)
     if ([string]$cfg.scrollStyle -eq 'classic') {
@@ -2539,68 +2606,7 @@ $xamlStr = @'
         </Trigger>
       </Style.Triggers>
     </Style>
-    <!--ZQSCR-->
-    <!-- v3.22: scrollbar FINA no tema — cor = chave "scroll" (⚙→Aparência); estilo
-         (fina arredondada / fina reta / clássica do Windows) escolhido no ⚙→Aparência;
-         hover do polegar = accent; Theme-Xaml remove o bloco quando o estilo é clássico. -->
-    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
-    <Style TargetType="ScrollBar">
-      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
-      <Setter Property="MinWidth" Value="8"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ScrollBar">
-            <Grid Background="Transparent">
-              <Track x:Name="PART_Track" IsDirectionReversed="True">
-                <Track.DecreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.DecreaseRepeatButton>
-                <Track.IncreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.IncreaseRepeatButton>
-                <Track.Thumb>
-                  <Thumb Focusable="False" Margin="1">
-                    <Thumb.Template>
-                      <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
-                        <ControlTemplate.Triggers>
-                          <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
-                          </Trigger>
-                        </ControlTemplate.Triggers>
-                      </ControlTemplate>
-                    </Thumb.Template>
-                  </Thumb>
-                </Track.Thumb>
-              </Track>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="Orientation" Value="Horizontal">
-                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
-                <Setter Property="MinHeight" Value="8"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-      <Style.Triggers>
-        <Trigger Property="Orientation" Value="Vertical">
-          <Setter Property="Width" Value="8"/>
-        </Trigger>
-        <Trigger Property="Orientation" Value="Horizontal">
-          <Setter Property="Height" Value="8"/>
-        </Trigger>
-      </Style.Triggers>
-    </Style>
-    <!--/ZQSCR-->
+    <!--SCRFRAG-->
     <!-- v3.18: ComboBox com visual do tema (fechado = input; lista = panel; foco/hover = accent).
          Template proprio porque o padrao do WPF ignora Background/Foreground e abre lista branca;
          cobre os dois modos: normal (ContentSite) e editavel (PART_EditableTextBox, ex.: SetFont). -->
@@ -2966,6 +2972,7 @@ $script:planMode = 'gate'    # v3.21: 'gate' = tool plan esperando decisão no t
                              # 'text' = plano escrito como resposta (turno já fechou) — botão aprova/executa
 $script:pendingPlanOk = $false   # v3.21: próximo envio nasce isento (aprovação de plano textual)
 $script:planGateSeen = $false    # v3.21: o turno já mostrou plano via tool (não duplicar botão textual)
+$script:turnTools = 0           # v3.24.1: tools executadas no turno corrente (gate do plano textual)
 $script:curAnswer = ''
 $script:lastAnswer = ''
 $script:pendSources = @()
@@ -3212,7 +3219,10 @@ function Finish-Turn {
     # aprovar envia a execução já isenta (pendingPlanOk). Com fila pendente não
     # abre (o despacho da fila leva a vez — ver tick abaixo).
     # v3.23.1: -not stopped — resposta truncada por ⏹ nao ganha barra de plano
-    if (-not $script:planGateSeen -and -not $script:stopped -and @($script:queuedMsgs).Count -eq 0) {
+    # v3.24.1: -and turnTools — SÓ quando o turno usou ferramentas (plano de
+    # execução). Resposta didática em passos numerados ("como fazer X?") sem
+    # tool nenhum não ganha mais a barra (era o falso positivo da revisão).
+    if (-not $script:planGateSeen -and -not $script:stopped -and @($script:queuedMsgs).Count -eq 0 -and $script:turnTools -gt 0) {
         $tp = Test-TextPlan $script:lastAnswer
         if ($tp) { Show-TextPlanBar $tp }
     }
@@ -3230,16 +3240,20 @@ function Finish-Turn {
             $items = @($script:queuedMsgs)
             if ($items.Count -eq 0) { return }
             $q = $items[0]
-            $script:queuedMsgs = @($items | Select-Object -Skip 1)
-            Update-QueueBar
             if ($script:planMode -eq 'text' -and $PlanBar.Visibility -eq 'Visible') {
                 Hide-PlanBar; $script:planMode = 'gate'; Log 'plano-texto: dispensado (mensagem da fila despachada)'
             }
             try {
                 Restore-QueuedItems $q.items
                 $InputBox.Text = [string]$q.text
-                Log 'fila: despachada'
                 Send-Current
+                # v3.24.1: só tira da fila DEPOIS do envio aceito (busy=1) — exceção
+                # ou recusa não perde a mensagem: ela segue no cartão ✉ e no campo
+                if ($script:busy) {
+                    $script:queuedMsgs = @($items | Select-Object -Skip 1)
+                    Update-QueueBar
+                    Log 'fila: despachada'
+                } else { Log 'fila: envio não iniciou — mensagem fica na fila' }
             } catch { Log "fila-dispatch: $_" }
         })
         $qt.Start()
@@ -3688,6 +3702,7 @@ function Send-Current {
     # system prompt = base + memoria (lida a CADA envio: fato salvo nesta conversa ja
     # vale para o proximo envio, e o arquvivo e' editavel a mao)
     $script:planGateSeen = $false                       # v3.21: novo turno, novo gate
+    $script:turnTools = 0                               # v3.24.1: contador de tools executadas (gate do plano textual)
     if ($script:planMode -eq 'text' -and $PlanBar.Visibility -eq 'Visible') { Hide-PlanBar; $script:planMode = 'gate'; Log 'plano-texto: dispensado (novo envio)' }
     $planOk = $script:pendingPlanOk; $script:pendingPlanOk = $false   # plano textual aprovado?
     $script:engine.Ask($text, $imgs, $txtFiles, $pdfs, ($sysPrompt + (Get-MemoryBlock) + (Get-SkillsBlock)), $planOk)
@@ -3897,66 +3912,7 @@ function Show-Settings {
         </Trigger>
       </Style.Triggers>
     </Style>
-    <!--ZQSCR-->
-    <!-- v3.22: scrollbar FINA no tema (idem janela principal) -->
-    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
-    <Style TargetType="ScrollBar">
-      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
-      <Setter Property="MinWidth" Value="8"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ScrollBar">
-            <Grid Background="Transparent">
-              <Track x:Name="PART_Track" IsDirectionReversed="True">
-                <Track.DecreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.DecreaseRepeatButton>
-                <Track.IncreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.IncreaseRepeatButton>
-                <Track.Thumb>
-                  <Thumb Focusable="False" Margin="1">
-                    <Thumb.Template>
-                      <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
-                        <ControlTemplate.Triggers>
-                          <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
-                          </Trigger>
-                        </ControlTemplate.Triggers>
-                      </ControlTemplate>
-                    </Thumb.Template>
-                  </Thumb>
-                </Track.Thumb>
-              </Track>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="Orientation" Value="Horizontal">
-                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
-                <Setter Property="MinHeight" Value="8"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-      <Style.Triggers>
-        <Trigger Property="Orientation" Value="Vertical">
-          <Setter Property="Width" Value="8"/>
-        </Trigger>
-        <Trigger Property="Orientation" Value="Horizontal">
-          <Setter Property="Height" Value="8"/>
-        </Trigger>
-      </Style.Triggers>
-    </Style>
-    <!--/ZQSCR-->
+    <!--SCRFRAG-->
     <!-- v3.18: idem janela principal + campos de texto: sem estilo implicito os TextBox/PasswordBox
          do dialogo caem no BRANCO padrao do WPF (so a janela principal declara cores locais) -->
     <Style TargetType="ComboBox">
@@ -4923,66 +4879,7 @@ function Show-History {
         </Trigger>
       </Style.Triggers>
     </Style>
-    <!--ZQSCR-->
-    <!-- v3.22: scrollbar FINA no tema (idem janela principal) -->
-    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
-    <Style TargetType="ScrollBar">
-      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
-      <Setter Property="MinWidth" Value="8"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ScrollBar">
-            <Grid Background="Transparent">
-              <Track x:Name="PART_Track" IsDirectionReversed="True">
-                <Track.DecreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.DecreaseRepeatButton>
-                <Track.IncreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.IncreaseRepeatButton>
-                <Track.Thumb>
-                  <Thumb Focusable="False" Margin="1">
-                    <Thumb.Template>
-                      <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
-                        <ControlTemplate.Triggers>
-                          <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
-                          </Trigger>
-                        </ControlTemplate.Triggers>
-                      </ControlTemplate>
-                    </Thumb.Template>
-                  </Thumb>
-                </Track.Thumb>
-              </Track>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="Orientation" Value="Horizontal">
-                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
-                <Setter Property="MinHeight" Value="8"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-      <Style.Triggers>
-        <Trigger Property="Orientation" Value="Vertical">
-          <Setter Property="Width" Value="8"/>
-        </Trigger>
-        <Trigger Property="Orientation" Value="Horizontal">
-          <Setter Property="Height" Value="8"/>
-        </Trigger>
-      </Style.Triggers>
-    </Style>
-    <!--/ZQSCR-->
+    <!--SCRFRAG-->
   </Window.Resources>
   <DockPanel>
     <Border DockPanel.Dock="Top" Padding="14,8,4,6">
@@ -5145,7 +5042,7 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; $script:liveDirty = $true }   # render no throttle abaixo
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|🧹|pass:|✅') { Log ('tool: ' + $m.Text) } }   # v3.21: ✅ = isenções (plano/sempre permitido) no log
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|🧹|pass:|✅') { Log ('tool: ' + $m.Text) }; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖') { $script:turnTools++ } }   # v3.21: ✅ = isenções no log · v3.24.1: turnTools conta EXECUÇÃO de tool no turno (gate do plano textual)
             'sources' { Show-Sources $m.Text }
             'plan' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
@@ -6021,66 +5918,7 @@ function Show-UpdateWindow($u) {
         Background='Transparent' WindowStartupLocation='CenterOwner'
         SizeToContent='Height' Width='480' ResizeMode='NoResize' ShowInTaskbar='False'>
   <Window.Resources>
-    <!--ZQSCR-->
-    <!-- v3.22: scrollbar FINA no tema (idem janela principal) -->
-    <SolidColorBrush x:Key="ZScrollBrush" Color="#50505C"/>
-    <Style TargetType="ScrollBar">
-      <Setter Property="Background" Value="{DynamicResource ZScrollBrush}"/>
-      <Setter Property="MinWidth" Value="8"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ScrollBar">
-            <Grid Background="Transparent">
-              <Track x:Name="PART_Track" IsDirectionReversed="True">
-                <Track.DecreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.DecreaseRepeatButton>
-                <Track.IncreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False">
-                    <RepeatButton.Template>
-                      <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
-                    </RepeatButton.Template>
-                  </RepeatButton>
-                </Track.IncreaseRepeatButton>
-                <Track.Thumb>
-                  <Thumb Focusable="False" Margin="1">
-                    <Thumb.Template>
-                      <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="ThBd" Background="{TemplateBinding Background}" CornerRadius="ZQSCRAD"/>
-                        <ControlTemplate.Triggers>
-                          <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="ThBd" Property="Background" Value="#3B78FF"/>
-                          </Trigger>
-                        </ControlTemplate.Triggers>
-                      </ControlTemplate>
-                    </Thumb.Template>
-                  </Thumb>
-                </Track.Thumb>
-              </Track>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="Orientation" Value="Horizontal">
-                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
-                <Setter Property="MinHeight" Value="8"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-      <Style.Triggers>
-        <Trigger Property="Orientation" Value="Vertical">
-          <Setter Property="Width" Value="8"/>
-        </Trigger>
-        <Trigger Property="Orientation" Value="Horizontal">
-          <Setter Property="Height" Value="8"/>
-        </Trigger>
-      </Style.Triggers>
-    </Style>
-    <!--/ZQSCR-->
+    <!--SCRFRAG-->
   </Window.Resources>
   <Border Background='#202024' BorderBrush='#3A3A44' BorderThickness='1' CornerRadius='10' Padding='18' Margin='10'>
     <StackPanel>
