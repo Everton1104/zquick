@@ -51,7 +51,12 @@ delete` (Lixeira) · `run_ps` em **sessão persistente** por conversa ·
 Sempre/✕ (45s) · **modo plano** (aprova 3+ ações de uma vez) ·
 `ask_user` multi-pergunta com preview · tools de leitura em
 **paralelo** · cliente **MCP** stdio (`mcpServers` no json) ·
-**subagente de leitura** (`research`) · **skills** `.md` em `skills\`.
+**subagente de leitura** (`research`) · **skills** `.md` em `skills\` ·
+**hooks** (`PreToolUse` nega/aprova por política, `PostToolUse`/`TurnEnd`
+observadores) · **slash commands** do usuário (`commands\nome.md` →
+`/nome args`) · **fallback de modelo** no meio do turno (model → fast →
+big → `modelFallback`) · `todo_write` + painel 📋 · `git_status/diff/
+log/commit`.
 
 **Janela** — ⚙ de configurações (4 abas) com **15 cores do tema**
 repintando ao vivo · escala global de fonte · moldura própria
@@ -86,6 +91,8 @@ oráculo = `%TEMP%\zquick.log`). Lista completa em
 | `answerFont` / `answerFontSize` | — / 13 | fonte do texto; tamanho 13 = 100% — **escala a interface toda** (10–22) |
 | `allow` | — | `runPs` (comandos exatos) e `paths` (pastas) do "✔ Sempre" |
 | `mcpServers` | — | `{ nome: { command, args[] } }` — servidores MCP stdio (tools viram `mcp_*`) |
+| `hooks` | — | `{PreToolUse:[{tool,run}],PostToolUse:[…],TurnEnd:[{run}]}` — `tool:"*"` casa tudo; hook exit 2 = nega (stdout vira motivo pro modelo), exit 0 = aprova por política (pula a confirmação); recebe JSON no stdin |
+| `modelFallback` | — | `["modelo-x", …]` — extras na cadeia de fallback após fast/big |
 | `profiles.{nome}` | — | `label, baseUrl, apiKey, fastModel, bigModel, visionModel, models[]` — o assistente cria o perfil `local` para LLM local |
 
 A chave da API fica no perfil do `zquick.json` ou em
@@ -98,6 +105,8 @@ A chave da API fica no perfil do `zquick.json` ou em
 | `build-exe.ps1` / `build-msi.ps1` | gera `zquick.exe` (PS2EXE) / instalador MSI (WiX) |
 | `check-engine.ps1` | valida o engine C# no pwsh 7 e no 5.1 |
 | `kit/` | kit de distribuição: INSTALAR/DESINSTALAR, LEIA-ME, MANUAL, template de config |
+| `commands/` | slash commands do usuário: `nome.md` vira `/nome args` (`$ARGUMENTS` = resto da linha) |
+| `skills/` | skills `.md` lidas pelo modelo via `skill_read` |
 | `test-*.ps1` | testes (engine headless + E2E de UI) |
 | `NOTAS-DESENVOLVIMENTO.md` | arquitetura, versões e lições de engenharia |
 

@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.25.0'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.26.0'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -629,6 +629,13 @@ public class Engine {
     readonly object _sync = new object();
     volatile int _busy = 0;
     public string _shCwd = null;   // Onda 7: último cwd da sessão persistente — default de 'repo' das git tools
+    // Onda 8: hooks + cadeia de fallback (chaves "hooks" e "modelFallback" do zquick.json)
+    public string HooksJson = null;     // JSON {"PreToolUse":[{tool,run}],...} — ParseHooks lê 1x
+    public string FallbackExtra = null; // JSON array de modelos extras após model->fast->big
+    string _hookAllow = null;           // PreToolUse exit 0 = política — ESTA chamada pula o GateConfirm
+    string _modelSave = null;           // modelo escolhido no ⚙ — restaurado no fim do turno se o fallback trocar
+    bool _hooksParsed = false;
+    List<string[]> _preHooks = new List<string[]>(), _postHooks = new List<string[]>(), _endHooks = new List<string[]>();   // [tool|*, run]
     CancellationTokenSource _cts;
     Timer _prewarm;
     // sessao de shell persistente (#3): processo vivo com pipes; cwd/vars/funcoes sobrevivem
@@ -647,6 +654,7 @@ public class Engine {
     static readonly Regex RxItem = new Regex("<item>.*?<title>(.*?)</title>.*?<link>(.*?)</link>.*?<description>(.*?)</description>", RegexOptions.Singleline | RegexOptions.Compiled);
 
     public bool Busy { get { lock (_sync) { return _busy == 1; } } }
+    public string CurModel { get { lock (_sync) { return _model; } } }   // Onda 8: teste/⚠ do fallback — modelo em uso AGORA
 
     // ---------- retry: 429/5xx/falha de rede ANTES do 1o token -> backoff exponencial ----------
     static readonly int[] RetryMs = new int[] { 1000, 3000, 8000 };
@@ -839,6 +847,7 @@ public class Engine {
         if (_passThrough) { Emit("status", "pass: aprovado sem confirmar - " + Trunc(subject ?? title, 60)); return true; }   // v3.12: modo passthrough (liga/desliga NO BOTAO, nunca via LLM)
         if (_planOk) { Emit("status", "✅ plano: " + Trunc(subject ?? title, 60)); return true; }   // aprovado em lote
         if (ShouldAutoApprove(tool, subject)) { Emit("status", "✅ sempre permitido: " + Trunc(subject, 60)); return true; }
+        if (_hookAllow == tool) { _hookAllow = null; Emit("status", "pass: hook aprovou " + Trunc(subject ?? title, 60)); return true; }   // Onda 8: política do PreToolUse
         int id;
         lock (_sync) { _confirmId++; id = _confirmId; _confOk = false; _confEv.Reset(); _confTool = tool; _confSubject = subject; }
         var sb = new StringBuilder();
@@ -1190,6 +1199,22 @@ public class Engine {
             }
 
             string stop = ""; bool sawText = false; int mtBumps = 0;
+            // Onda 8: cadeia de fallback do turno (model → fast → big → extras do json)
+            _hookAllow = null;
+            List<string> chain = new List<string>();
+            chain.Add(_model);
+            if (!string.IsNullOrEmpty(_fast) && !chain.Contains(_fast)) chain.Add(_fast);
+            if (!string.IsNullOrEmpty(_big) && !chain.Contains(_big)) chain.Add(_big);
+            if (!string.IsNullOrEmpty(FallbackExtra)) {
+                try {
+                    object fx = MJ.Parse(FallbackExtra);
+                    if (fx is List<object>) foreach (object x in (List<object>)fx) {
+                        string xm = x as string;
+                        if (!string.IsNullOrEmpty(xm) && !chain.Contains(xm)) chain.Add(xm);
+                    }
+                } catch { }
+            }
+            int fbIdx = 0;   // índice na cadeia de fallback (0 = modelo escolhido)
             // teto de rodadas por turno: 16 (era 12 — sonda 16/10: tarefa real de
             // implementacao morreu NO teto: 6 rodadas de diagnostico + plano + 5
             // pos-plano = 12; turno terminou sem texto final e o plano pela metade).
@@ -1234,6 +1259,18 @@ public class Engine {
                             if (ct.WaitHandle.WaitOne(RetryMs[attempt])) { StopCancelled(); return; }
                             continue;
                         }
+                        // Onda 8: orçamento de tentativas do modelo esgotou (ou erro sem
+                        // recurso) → CADEIA DE FALLBACK: troca de modelo e refaz a ida
+                        // em vez de matar o turno; o modelo do ⚙ volta no fim do turno.
+                        if (!ct.IsCancellationRequested && fbIdx + 1 < chain.Count) {
+                            string oldM = _model; fbIdx++;
+                            if (_modelSave == null) _modelSave = oldM;
+                            lock (_sync) { _model = chain[fbIdx]; body = BuildBody(round == 0 ? sys0 : sys); }
+                            Emit("status", "⚠ " + oldM + " falhou (" + Trunc(ex.Message, 60) + ") — tentando " + _model + "…");
+                            Emit("note", "⚡ fallback: o turno continua no " + _model + ". O modelo escolhido no ⚙ volta na próxima pergunta.");
+                            attempt = -1;   // orçamento novo de tentativas para o próximo modelo
+                            continue;
+                        }
                         throw;
                     }
                 }
@@ -1273,6 +1310,7 @@ public class Engine {
                     // o thinking come o maxTokens — a rodada "termina" sem dizer nada)
                     if (stop == "max_tokens") Emit("note", "⚠ rodada cortada pelo limite de tokens (aumente maxTokens no ⚙ se faltar conteúdo)");
                     else if (!sawText) Emit("note", "⚠ o modelo devolveu resposta vazia neste turno — tente reenviar ou um modelo maior no ⚙");
+                    HookTurnEnd();   // Onda 8
                     Emit("done", ""); return;
                 }
                 // executa tools — Onda 4: leitura/busca EM PARALELO, o resto serial na ordem
@@ -1297,11 +1335,16 @@ public class Engine {
                     if (bj2.Count > 0) { string aj2 = "{\"role\":\"assistant\",\"content\":[" + string.Join(",", bj2) + "]}"; lock (_sync) { _history.Add(aj2); _full.Add(aj2); } }
                 } catch (Exception ex2) { if (!ct.IsCancellationRequested) Emit("note", "fechamento falhou: " + Trunc(ex2.Message, 120)); }
             }
+            HookTurnEnd();   // Onda 8
             Emit("done", "");
         } catch (Exception ex) {
             if (ct.IsCancellationRequested) StopCancelled();
             else Emit("error", ex.Message);
-        } finally { lock (_sync) { _busy = 0; } }
+        } finally {
+            _hookAllow = null;   // allow de hook é por CHAMADA, nunca atravessa turno
+            if (_modelSave != null) lock (_sync) { _model = _modelSave; _modelSave = null; }   // Onda 8: ⚙ model volta
+            lock (_sync) { _busy = 0; }
+        }
     }
 
     // ---------- execucao das tools do round (Onda 4 #5: leitura em paralelo) ----------
@@ -1316,14 +1359,116 @@ public class Engine {
             || name == "git_status" || name == "git_diff" || name == "git_log";
     }
 
+    // ---------- Onda 8: hooks (zquick.json "hooks") ----------
+    // PreToolUse: stdin = {"hook_event_name":"PreToolUse","tool_name":..,"tool_input":{..}}
+    //   exit 2 = NEGA a tool (stdout vira o motivo devolvido ao modelo);
+    //   exit 0 = política do usuário — a chamada passa SEM o GateConfirm
+    //   (substitui o "sempre permitir" por regra escrita);
+    //   outro código / timeout 20s = deixa passar (fail-open; timeout avisa).
+    // PostToolUse: stdin = {...,"tool_result":<trunc 4000>} — fire-and-forget.
+    // TurnEnd: stdin = {"hook_event_name":"TurnEnd"} no fim do turno — idem.
+    // "run" roda via cmd.exe /c (CWD = pasta do app); saída lida em UTF-8.
+    void ParseHooks() {
+        _hooksParsed = true;
+        _preHooks.Clear(); _postHooks.Clear(); _endHooks.Clear();
+        if (string.IsNullOrEmpty(HooksJson)) return;
+        try {
+            Dictionary<string, object> h = MJ.Parse(HooksJson) as Dictionary<string, object>;
+            if (h == null) return;
+            LoadHookList(h, "PreToolUse", _preHooks);
+            LoadHookList(h, "PostToolUse", _postHooks);
+            LoadHookList(h, "TurnEnd", _endHooks);
+        } catch (Exception ex) { Emit("note", "hooks: JSON inválido no zquick.json — hooks desligados (" + Trunc(ex.Message, 80) + ")"); }
+    }
+    void LoadHookList(Dictionary<string, object> h, string key, List<string[]> into) {
+        object v;
+        if (!h.TryGetValue(key, out v) || !(v is List<object>)) return;
+        foreach (object x in (List<object>)v) {
+            Dictionary<string, object> d = x as Dictionary<string, object>;
+            if (d == null) continue;
+            string run = H.S(d, "run");
+            if (string.IsNullOrEmpty(run)) continue;
+            string tool = H.S(d, "tool");
+            if (string.IsNullOrEmpty(tool)) tool = "*";
+            into.Add(new string[] { tool, run });
+        }
+    }
+    int RunHook(string run, string stdinJson, int timeoutMs, out string so) {
+        so = "";
+        System.Diagnostics.Process p = null;
+        try {
+            var psi = new System.Diagnostics.ProcessStartInfo();
+            psi.FileName = "cmd.exe";
+            psi.Arguments = "/c " + run;
+            psi.UseShellExecute = false; psi.CreateNoWindow = true;
+            psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = System.Text.Encoding.UTF8; psi.StandardErrorEncoding = System.Text.Encoding.UTF8;
+            p = new System.Diagnostics.Process(); p.StartInfo = psi;
+            if (!p.Start()) return -2;
+            var soT = Task.Factory.StartNew(delegate { return p.StandardOutput.ReadToEnd(); });
+            var seT = Task.Factory.StartNew(delegate { return p.StandardError.ReadToEnd(); });
+            string si = stdinJson ?? "";
+            // stdin numa task: hook que escreve muito antes de ler entraria em deadlock
+            Task.Factory.StartNew(delegate { try { p.StandardInput.Write(si); p.StandardInput.Close(); } catch { } });
+            if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch { } return -1; }
+            so = ((soT.Result ?? "") + "\n" + (seT.Result ?? "")).Trim();
+            return p.ExitCode;
+        } catch (Exception ex) { so = ex.Message; return -3; }
+        finally { if (p != null) try { p.Dispose(); } catch { } }
+    }
+    string HookPreGate(string tool, string inputJson, CancellationToken ct) {
+        if (!_hooksParsed) ParseHooks();
+        if (ct.IsCancellationRequested || _preHooks.Count == 0) return null;
+        string run = null;
+        foreach (string[] e in _preHooks) if (e[0] == "*" || e[0] == tool) { run = e[1]; break; }
+        if (run == null) return null;
+        Emit("status", "\U0001FA9D PreToolUse (" + tool + ")…");
+        string payload = "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":" + J(tool) + ",\"tool_input\":" + (inputJson ?? "{}") + "}";
+        string so;
+        int rc = RunHook(run, payload, 20000, out so);
+        if (rc == 2) {
+            string why = (so ?? "").Trim();
+            if (why.Length > 300) why = why.Substring(0, 300);
+            return why.Length > 0 ? why : "bloqueado pela política (hook PreToolUse)";
+        }
+        if (rc == 0) { _hookAllow = tool; return null; }
+        if (rc == -1) Emit("note", "hook PreToolUse não respondeu em 20s — deixando passar");
+        return null;
+    }
+    void HookPost(string tool, string result) {
+        if (!_hooksParsed) ParseHooks();
+        if (_postHooks.Count == 0) return;
+        string run = null;
+        foreach (string[] e in _postHooks) if (e[0] == "*" || e[0] == tool) { run = e[1]; break; }
+        if (run == null) return;
+        string r = result ?? "";
+        if (r.Length > 4000) r = r.Substring(0, 4000);
+        string payload = "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":" + J(tool) + ",\"tool_result\":" + J(r) + "}";
+        string run2 = run;
+        Task.Factory.StartNew(delegate { string so2; RunHook(run2, payload, 15000, out so2); });
+    }
+    void HookTurnEnd() {
+        if (!_hooksParsed) ParseHooks();
+        if (_endHooks.Count == 0) return;
+        string payload = "{\"hook_event_name\":\"TurnEnd\"}";
+        foreach (string[] e in _endHooks) {
+            string run2 = e[1];
+            Task.Factory.StartNew(delegate { string so2; RunHook(run2, payload, 15000, out so2); });
+        }
+    }
+
     public string ExecTools(List<Blk> blocks, CancellationToken ct) {
         string[] outs = new string[blocks.Count];
         Task[] tasks = new Task[blocks.Count];
+        bool[] denied = new bool[blocks.Count];   // Onda 8: negado pelo hook PreToolUse
         int nPar = 0;
         for (int i = 0; i < blocks.Count; i++) {
             Blk b = blocks[i];
             if (b.Kind != "tool_use" || !Parallelizable(b.Name)) continue;
-            Dictionary<string, object> inp = MJ.Parse(b.Input.Length > 0 ? b.Input.ToString() : "{}") as Dictionary<string, object>;
+            string rawIn = b.Input.Length > 0 ? b.Input.ToString() : "{}";
+            string deny0 = HookPreGate(b.Name, rawIn, ct);   // Onda 8
+            if (deny0 != null) { outs[i] = "NEGADO pelo hook: " + deny0; denied[i] = true; continue; }
+            Dictionary<string, object> inp = MJ.Parse(rawIn) as Dictionary<string, object>;
             string nm = b.Name;
             string query = inp != null ? H.S(inp, "query") : null;
             string url = inp != null ? H.S(inp, "url") : null;
@@ -1348,9 +1493,14 @@ public class Engine {
             if (b.Kind != "tool_use") continue;
             if (ct.IsCancellationRequested) break;
             string outp;
-            if (tasks[i] != null) { tasks[i].Wait(); outp = outs[i] ?? ""; }
+            if (denied[i]) outp = outs[i];
+            else if (tasks[i] != null) { tasks[i].Wait(); outp = outs[i] ?? ""; }
             else {
-                Dictionary<string, object> inp = MJ.Parse(b.Input.Length > 0 ? b.Input.ToString() : "{}") as Dictionary<string, object>;
+                string rawIn2 = b.Input.Length > 0 ? b.Input.ToString() : "{}";
+                string deny = HookPreGate(b.Name, rawIn2, ct);   // Onda 8
+                if (deny != null) outp = "NEGADO pelo hook: " + deny;
+                else {
+                Dictionary<string, object> inp = MJ.Parse(rawIn2) as Dictionary<string, object>;
                 if (b.Name == "ask_user") { Emit("status", "❓ esperando sua escolha…"); outp = DoAskUser(inp, ct); }
                 else if (b.Name == "plan") {
                     string title = H.S(inp, "title");
@@ -1387,7 +1537,9 @@ public class Engine {
                     outp = McpCall(b.Name, b.Input.Length > 0 ? b.Input.ToString() : "{}");
                 }
                 else { Emit("status", "⚙ " + b.Name + "…"); outp = LocalTool(b.Name, inp, ct); }
+                }
             }
+            if (!denied[i]) HookPost(b.Name, outp);   // Onda 8: PostToolUse (async, não trava o turno)
             if (resJson.Length > 0) resJson.Append(",");
             resJson.Append("{\"type\":\"tool_result\",\"tool_use_id\":").Append(J(b.Id)).Append(",\"content\":").Append(J(outp)).Append("}");
         }
@@ -2674,6 +2826,12 @@ function New-EngineFromProfile {
     try { $pe = (Get-Process -Id $PID).Path } catch { $pe = $null }
     if (-not $pe -or $pe -notmatch '(?:powershell|pwsh)\.exe$') { $pe = 'powershell.exe' }
     $eng.PsExe = $pe
+    # Onda 8: hooks + cadeia extra de fallback (chaves "hooks" e "modelFallback")
+    if ($cfg.hooks) { try { $eng.HooksJson = ($cfg.hooks | ConvertTo-Json -Depth 6 -Compress) } catch { Log "hooks-config: $_" } }
+    $mf = @($cfg.modelFallback) | Where-Object { $_ }
+    if ($mf.Count -gt 0) {
+        try { $eng.FallbackExtra = $(if ($mf.Count -eq 1) { '["' + $mf[0] + '"]' } else { ($mf | ConvertTo-Json -Compress) }) } catch { Log "fallback-config: $_" }
+    }
     $eng
 }
 # tolerante: sem chave valida no perfil, o app abre e o engine nasce no 1o envio
@@ -3839,6 +3997,28 @@ function Send-Current {
         } catch { Log "scrollprobe erro: $_"; $StatusText.Text = 'scrollprobe erro (log)' }
         return
     }
+    # Onda 8: slash commands do usuário — commands\nome.md vira /nome no input
+    # ($ARGUMENTS recebe o resto da linha). Expande até 3 níveis (comando chamando
+    # comando); /desconhecido avisa em vez de mandar a barra pro modelo.
+    $slashDepth = 0
+    while ($text -match '^/([A-Za-z0-9_-]+)\s*([\s\S]*)$' -and $slashDepth -lt 3) {
+        $cname = $Matches[1]; $cargs = [string]$Matches[2]
+        $cfile = Join-Path $PSScriptRoot ("commands\" + $cname + ".md")
+        if (-not (Test-Path $cfile)) {
+            # top-level desconhecido: avisa e NÃO envia; aninhado: mantém o
+            # já-expandido do pai (só para de recursar)
+            if ($slashDepth -eq 0) {
+                $StatusText.Text = "comando /$cname não achado — crie commands\$cname.md (`$ARGUMENTS recebe o resto da linha)"
+                return
+            }
+            break
+        }
+        $tmpl = [IO.File]::ReadAllText($cfile)
+        $text = ([string]($tmpl -replace '\$ARGUMENTS', $cargs)).Trim()
+        Log ("slash: /{0} expandido ({1} chars)" -f $cname, $text.Length)
+        $slashDepth++
+    }
+    if ($slashDepth -gt 0) { $InputBox.Text = $text }
     $imgs = [System.Collections.Generic.List[string]]::new()
     $txtFiles = [System.Collections.Generic.List[string[]]]::new()
     $pdfs = [System.Collections.Generic.List[string[]]]::new()
@@ -5242,7 +5422,7 @@ $timer.Add_Tick({
     while ($queue.TryDequeue([ref]$m)) {
         switch ($m.Type) {
             'delta'   { $script:curAnswer += $m.Text; $script:liveDirty = $true }   # render no throttle abaixo
-            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|🧹|pass:|✅') { Log ('tool: ' + $m.Text) }; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖') { $script:turnTools++ } }   # v3.21: ✅ = isenções no log · v3.24.1: turnTools conta EXECUÇÃO de tool no turno (gate do plano textual)
+            'status'  { $StatusText.Text = $m.Text; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖|⚠|🧹|🪝|pass:|✅') { Log ('tool: ' + $m.Text) }; if ($m.Text -match '🔍|🌐|📄|↗|⚙|❓|🧭|🤖') { $script:turnTools++ } }   # v3.21: ✅ = isenções no log · v3.24.1: turnTools conta EXECUÇÃO de tool no turno · v3.26: 🪝 = hooks (loga, não conta como tool)
             'sources' { Show-Sources $m.Text }
             'plan' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("plan-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }

@@ -24,6 +24,17 @@ if (Test-Path $srcSkills) {
     }
 }
 
+# commands (Onda 8): slash commands .md — copia os exemplos sem sobrescrever
+$srcCmds = Join-Path $src 'commands'
+if (Test-Path $srcCmds) {
+    $dstCmds = Join-Path $dst 'commands'
+    New-Item -ItemType Directory -Force $dstCmds | Out-Null
+    Get-ChildItem $srcCmds -Filter *.md -File | ForEach-Object {
+        $t = Join-Path $dstCmds $_.Name
+        if (-not (Test-Path $t)) { Copy-Item $_.FullName $t -Force }
+    }
+}
+
 # atalho na Inicializacao NAO e' mais criado aqui: o assistente de configuracao
 # (abre sozinho na 1a execucao) pergunta se voce quer iniciar com o Windows e
 # grava a chave Run — quem ja' tinha o atalho antigo continua funcionando.

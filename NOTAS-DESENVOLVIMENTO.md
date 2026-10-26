@@ -82,7 +82,11 @@ medidor de contexto, tools de leitura em paralelo e cliente MCP. A
 **Onda 5** (`fd14a10`) foi além do comparativo: subagente de leitura
 com contexto próprio e skills em `.md`. A **Onda 6** (`3474ddf`)
 cuidou do shell visual: menu ⚙ de configurações e moldura própria com
-janela memorizada. E o ZQuick faz coisas que o Claude Code não faz:
+janela memorizada. A **Onda 7** (`57860a8`, v3.25) fechou o "dev
+diário" (git_status/diff/log/commit, grep com contexto/modos,
+todo_write + painel 📋) e a **Onda 8** (v3.26) o harness: hooks,
+slash commands e fallback de modelo. E o ZQuick faz coisas que o
+Claude Code não faz:
 residente Alt+Q + bandeja, anexos por Ctrl+V, histórico retomável com
 imagens.
 
@@ -110,6 +114,8 @@ imagens.
 | (…) | v3.10–v3.23: ver `git log` — compactação E2E, favoritar/renomear histórico, ⧉ copiar resposta, assistente de configuração 4 etapas + MSI + auto-update GitHub, escala/temas/scrollbar temática, repintura ao vivo do ✔ Aplicar (v3.23) |
 | — | v3.24 — assistente com presets de provedor (Z.ai/Kimi/DeepSeek) e **LLM local** (Ollama/LM Studio/llama.cpp, chave opcional, perfil `local`); MSI com UI pt-BR + "Iniciar o ZQuick agora"; LEIA-ME enxuto + MANUAL.txt |
 | — | v3.24.1 — gate do plano textual só quando o turno usou tools (`turnTools`, mata o falso positivo de resposta didática em passos); fila ✉ só sai depois do envio aceito (`busy`), recusa/exceção não perde a mensagem; estilo da scrollbar em **um** fragmento (`$scrFrag` + marcador `<!--SCRFRAG-->` injetado pelo Theme-Xaml, era copiado 4×) |
+| `57860a8` | v3.25 (Onda 7) — `git_status/diff/log` (repo > `_shCwd` > cwd, valida `.git`) + `git_commit` no GateConfirm; `file_grep` com `mode:"files"/"count"`, `context:0-3` (grupos separados por `--`) e `max:1-200`; `todo_write` + painel 📋 (○ ●accent ✔riscado, `/uitest todo2` cobre o drain; lição: `.clear` em array do ConvertFrom-Json resolve para IList.Clear — PSMethod truthy — checar `-is [PSCustomObject]` antes) |
+| — | v3.26 (Onda 8) — **hooks** (`PreToolUse` exit 2 = nega com motivo no tool_result / exit 0 = aprova por política e pula o GateConfirm (`_hookAllow`), `PostToolUse`/`TurnEnd` async fire-and-forget, payload JSON no stdin via Task, 20s timeout fail-open); **slash commands** (`commands\nome.md` → `/nome args`, `$ARGUMENTS`, aninhamento ≤3, desconhecido avisa e **return** — o `break` sozinho caía no envio); **fallback de modelo** (cadeia model → fast → big → `modelFallback` do json, dedupe; após esgotar as 4 tentativas troca `fbIdx`/`_modelSave` e reconstrói o body, `CurModel` restaurado no finally) |
 
 ## Notas de engenharia (lições)
 
@@ -182,3 +188,17 @@ imagens.
   filtre por `Dialog_ = '…'` e case o texto no PowerShell; backtick de
   crase do SQL é ESCAPE no PowerShell — string de consulta com aspas
   simples.
+- **Server HTTP fake de teste: `Content-Length` conta BYTES, não chars**
+  (UTF-8: acento/emoji = 2+ bytes) — comparar `$req.Length` nunca fecha
+  a leitura com corpo não-ASCII e o servidor fica travado no `Read`
+  (o cliente pendura até o timeout). Contar `$total += $n` em bytes e
+  só decodificar no final; headers são ASCII, então o índice do fim do
+  header em chars == bytes.
+- **`\b` é um escape JSON VÁLIDO (backspace)** — caminho Windows
+  embutido em JSON (`...\busca.txt`) corrompe em silêncio: dobrar TODA
+  a barra invertida do path (`-replace '\\','\\'`), não só os
+  separadores óbvios.
+- **Payload de hook em JSON**: idem — o `run` com caminho e o
+  `HooksJson` montado no PS 5.1 precisam do path com barras dobradas,
+  senão o `MJ.Parse` falha e os hooks ligam "desligados" (o sintoma é o
+  GateConfirm abrir normal, sem erro).

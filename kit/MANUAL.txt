@@ -92,6 +92,13 @@
                 Windows: o caminho escolhido entra no texto e o modelo
                 lê o arquivo por conta própria. Cancelar deixa o @
                 cair como texto comum (e-mails e @usuário não abrem).
+  /comando ..... SLASH COMMAND SEU: um arquivo commands\nome.md ao
+                lado do app vira o comando /nome na caixa de texto.
+                O resto da linha entra no template onde estiver
+                $ARGUMENTS (ex.: /commit . puxa o status+diff e
+                sugere a mensagem). Aninhado até 3 níveis (template
+                começando com /outro). Comando desconhecido: avisa
+                no rodapé e NÃO envia.
   ⏹ Parar ..... durante a resposta o botão Enviar vira "Parar": corta
                 na hora (o texto que já chegou fica no card).
   ✉ ........... digitar durante a resposta ENFILEIRA a mensagem: ela
@@ -156,6 +163,24 @@
   exceção e não perguntar mais para isto) / ✕ Negar (expira sozinha
   em 45s). Passa tudo de uma vez? Ative o passthrough ⚡ na barra do
   topo (GateConfirm aprova automaticamente; o botão liga/desliga).
+
+  HOOKS: automatize as confirmações com POLÍTICAS suas. No
+  zquick.json, "hooks" registra um comando para rodar ANTES de uma
+  tool (PreToolUse), DEPOIS (PostToolUse) ou no FIM do turno
+  (TurnEnd). O hook recebe um JSON no stdin e decide pelo exit code:
+    • exit 2 = NEGAR a ação — o que o hook imprimir no stdout vai
+      para o modelo como motivo (ex.: "fora do horário");
+    • exit 0 = APROVAR POR POLÍTICA — pula a confirmação daquela
+      chamada (substitui o "✔ Sempre");
+    • qualquer outro/não casar = segue o fluxo normal (pergunta).
+  Exemplo — aprovar todo file_write na pasta do projeto:
+    "hooks": { "PreToolUse": [
+      { "tool": "file_write",
+        "run": "powershell -NoProfile -File aprova.ps1" } ] }
+  ("tool": "*" casa qualquer uma; até 20s por hook, depois segue o
+  fluxo normal). PostToolUse/TurnEnd são observadores: recebem o
+  que aconteceu ({tool_name, tool_input, tool_result} / o turno)
+  e não mudam o fluxo — servem para log/estatística/notificação.
 
   PLANO: para tarefas com 3+ ações, o assistente propõe um PLANO
   (título + passos) e você aprova UMA vez — tudo roda sem pedir
@@ -307,6 +332,13 @@
                    glm flash/air/mini/lite, deepseek e qwen 128k
   systemPrompt ... troca a personalidade do assistente
   mcpServers ..... servidores MCP (stdio) — ver seção 5
+  hooks .......... PreToolUse/PostToolUse/TurnEnd — ver seção 4
+  modelFallback .. lista de modelos extras para o FALLBACK: se o
+                   modelo do turno cair 4 vezes seguidas (429/5xx/
+                   rede), o app tenta o próximo da cadeia (model →
+                   fast → big → estes) e o turno CONTINUA em vez de
+                   morrer; o modelo do ⚙ volta na próxima pergunta.
+                   Ex.: "modelFallback": ["glm-5.3-flash"]
   allow .......... exceções "✔ Sempre permitir" das confirmações
                    (pares tool/padrão)
 

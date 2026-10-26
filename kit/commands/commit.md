@@ -1,0 +1,1 @@
+No repositório $ARGUMENTS (se vazio: o último usado pelo shell desta conversa), rode git_status e git_diff, resuma em 3-5 bullets o que mudou e por quê, e proponha UMA mensagem de commit (conventional commits, descrição em pt-BR). NÃO faça o commit — apenas mostre a mensagem sugerida e espere eu confirmar.

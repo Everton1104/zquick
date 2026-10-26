@@ -26,9 +26,9 @@ Ondas 1-6. Levantamento de 26/10 contra o CC 2.1.310 local:
 | **Todo list** | ✅ todo_write + painel 📋 | **7** |
 | **Git** | ✅ git_status/diff/log/commit | **7** |
 | **Grep rico** (contexto/modos) | ✅ file_grep modes+context+max | **7** |
-| Hooks (pós-tool etc.) | ❌ | 8 |
-| Slash commands | ❌ (só /uitest interno) | 8 |
-| Model fallback chain | ❌ | 8 |
+| Hooks (pós-tool etc.) | ✅ PreToolUse/PostToolUse/TurnEnd | **8** |
+| Slash commands | ✅ `commands\nome.md` → `/nome` | **8** |
+| Model fallback chain | ✅ model → fast → big → modelFallback | **8** |
 | Subagente com ESCRITA | ❌ | 9 |
 | Sessões em background | ❌ | 9 |
 | Modo plano | ✅ plano textual + lote isento | v3.21 |
@@ -46,15 +46,22 @@ Ondas 1-6. Levantamento de 26/10 contra o CC 2.1.310 local:
   em accent/negrito, ✔ concluído riscado), limpa em conversa nova, esconde
   via ✕ sem matar a tool.
 
-## Onda 8 — automação do harness (próxima)
+## Onda 8 — automação do harness (v3.26, concluída)
 
-- **Hooks**: roda um comando PS em eventos (antes/depois de tool, fim de
-  turno) — configurável no zquick.json, substitui o "Sempre permitir" por
-  políticas.
-- **Slash commands**: `/comando` definido pelo usuário (prompt template +
-  argumentos), além dos internos.
-- **Model fallback**: cadeia `fastModel → model → bigModel` com retry
-  automático em erro/429, em vez de morrer o turno.
+- **Hooks** (zquick.json `"hooks"`): `PreToolUse` pode **negar** (exit 2 —
+  stdout vira o motivo no tool_result) ou **aprovar por política** (exit 0 —
+  pula o GateConfirm daquela call, loga `pass: hook aprovou`); `PostToolUse`
+  e `TurnEnd` disparam async (fire-and-forget) com payload JSON no stdin
+  (`{tool_name, tool_input, tool_result}` / histórico do turno). 20s timeout,
+  fail-open. Ex.: `{"PreToolUse":[{"tool":"file_write","run":"powershell
+  -NoProfile -File meu-hook.ps1"}]}`.
+- **Slash commands**: `commands\nome.md` ao lado do app vira `/nome args`
+  no input (`$ARGUMENTS` = resto da linha; até 3 níveis de aninhamento;
+  desconhecido avisa no status e NÃO envia). Exemplo embutido: `/commit`.
+- **Model fallback**: no meio do turno, se o modelo estourar as 4 tentativas
+  de retry (429/5xx/rede), troca para o próximo da cadeia (model → fast →
+  big → `"modelFallback":[...]` do zquick.json, dedupe) e continua; o modelo
+  do ⚙ volta na próxima pergunta.
 
 ## Onda 9 — multiagente
 
