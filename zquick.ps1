@@ -36,7 +36,7 @@ $appVer = '3.26.0'   # versão do app — instalador e auto-update comparam com 
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
-    hotkey        = 'win+c'
+    hotkey        = 'alt+q'   # v3.26: era win+c (heranca do AHK do Everton) - padrao de fabrica volta a ser o alt+q do LEIA-ME
     maxTokens     = 4096
     searchEngine  = 'bing'      # bing (pre-busca cliente) | zai-server (web_search_prime no servidor) | zai
     promptCache   = $true       # cache_control no system+tools (Z.ai aceita; provado por sonda)
@@ -573,6 +573,15 @@ public static class Hook {
         _fire = fire; _cb = HookCb;
         _hhk = SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, _cb, GetModuleHandle(null), 0);
         return _hhk != IntPtr.Zero;
+    }
+
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    // v3.26: trocar o atalho ao vivo (⚙ → Geral) sem deixar hook antigo pendurado
+    public static bool Uninstall() {
+        if (_hhk == IntPtr.Zero) return false;
+        bool ok = UnhookWindowsHookEx(_hhk);
+        _hhk = IntPtr.Zero; _cb = null; _fire = null;
+        return ok;
     }
 
     static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
@@ -3040,6 +3049,7 @@ $xamlStr = @'
             <Button x:Name="NewBtn" Content="Nova" Margin="8,0,0,0" WindowChrome.IsHitTestVisibleInChrome="True"/>
             <Button x:Name="HistBtn" Content="🕘" Margin="8,0,0,0" ToolTip="Histórico — retomar conversa salva" WindowChrome.IsHitTestVisibleInChrome="True"/>
             <Button x:Name="TopBtn" Content="📌" Margin="8,0,0,0" ToolTip="sempre no topo — manter a janela sobre as outras" WindowChrome.IsHitTestVisibleInChrome="True"/>
+            <Button x:Name="WizBtn" Content="🧙" Margin="8,0,0,0" FontSize="13" ToolTip="Assistente de configuração — provedor, chave da API, modelos e inicialização (atalho fica no ⚙ → Geral)" WindowChrome.IsHitTestVisibleInChrome="True"/>
             <Button x:Name="PassBtn" Content="⚡" Margin="8,0,0,0" ToolTip="passthrough — aprovar ações (edits/comandos) sem confirmar; clica AQUI para ligar/desligar" WindowChrome.IsHitTestVisibleInChrome="True"/>
           </WrapPanel>
         </DockPanel>
@@ -3047,6 +3057,13 @@ $xamlStr = @'
     </Border>
     <Border DockPanel.Dock="Bottom">
       <StackPanel>
+        <!-- v3.26: sem chave no perfil ativo -> CTA do assistente no corpo do chat -->
+        <Border x:Name="NoKeyBar" Visibility="Collapsed" Background="#3A3A44" CornerRadius="6" Margin="14,6,14,0" Padding="10,8">
+          <DockPanel>
+            <Button x:Name="NoKeyBtn" DockPanel.Dock="Right" Content="🧙 Abrir assistente" FontWeight="SemiBold" Padding="12,4" Margin="10,0,0,0" VerticalAlignment="Center"/>
+            <TextBlock Text="Sem chave da API neste perfil — o assistente configura provedor, chave e modelos em 4 passos." Foreground="#E8E8EC" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          </DockPanel>
+        </Border>
         <ScrollViewer x:Name="AttachScroll" MaxHeight="76" Visibility="Collapsed" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Margin="14,6,14,0">
           <StackPanel x:Name="AttachPanel" Orientation="Horizontal"/>
         </ScrollViewer>
@@ -3148,7 +3165,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'LogoText','ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','TodoBar','TodoHeader','TodoHide','TodoScroll','TodoItems','QueueBar','QueueHeader','QueueScroll','QueuePanel','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'LogoText','ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','WizBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','NoKeyBar','NoKeyBtn','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','TodoBar','TodoHeader','TodoHide','TodoScroll','TodoItems','QueueBar','QueueHeader','QueueScroll','QueuePanel','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -3181,6 +3198,9 @@ function Set-Passthrough([bool]$on) {
 }
 if ($cfg.passthrough) { Set-PassBtnVisual $true }
 $PassBtn.Add_Click({ Set-Passthrough (-not [bool]$cfg.passthrough) })
+# v3.26: 🧙 na toolbar (antes so' no ⚙/bandeja) + CTA do corpo do chat
+$WizBtn.Add_Click({ try { Show-SetupWizard $true } catch { Log "wizard(botao): $_" } })
+$NoKeyBtn.Add_Click({ try { Show-SetupWizard $true } catch { Log "wizard(sem-chave): $_" } })
 function Set-Topmost([bool]$on) {
     $window.Topmost = $on
     $cfg.alwaysOnTop = $on
@@ -4468,7 +4488,7 @@ function Show-Settings {
                     <Button DockPanel.Dock="Right" x:Name="SetListModels" Content="🔎 listar da API" Margin="6,0,0,0" Padding="8,2" FontSize="11"
                             ToolTip="Busca a lista de modelos do provedor (GET /v1/models do padrão Anthropic) e preenche a caixa abaixo"/>
                     <Button DockPanel.Dock="Right" x:Name="SetWiz" Content="🧙 assistente" Margin="6,0,0,0" Padding="8,2" FontSize="11"
-                            ToolTip="Assistente de configuração: testa a conexão, mede a velocidade de cada modelo, recomenda rápido/forte, inicialização com o Windows e atalho"/>
+                            ToolTip="Assistente de configuração: testa a conexão, mede a velocidade de cada modelo, recomenda rápido/forte e inicialização com o Windows (atalho fica no ⚙ → Geral)"/>
                     <TextBlock Text="modelos (vírgula — caixa do topo)" Foreground="#9A9AA5" FontSize="11" VerticalAlignment="Center"/>
                   </DockPanel>
                   <TextBox x:Name="SetModels" FontFamily="Cascadia Mono, Consolas"/>
@@ -4539,6 +4559,13 @@ function Show-Settings {
             <StackPanel>
               <TextBlock Text="Busca web" Foreground="#9A9AA5" FontSize="11" Margin="0,0,0,4"/>
               <ComboBox x:Name="SetSearch" FontSize="12" HorizontalAlignment="Left" MinWidth="200"/>
+              <TextBlock Text="atalho de abrir a janela (ex.: alt+q · ctrl+shift+z · win+j)" Foreground="#9A9AA5" FontSize="11" Margin="0,12,0,4"/>
+              <DockPanel>
+                <Button DockPanel.Dock="Right" x:Name="SetHkApply" Content="armar" Margin="6,0,0,0" Padding="8,2" FontSize="11"
+                        ToolTip="Registra o atalho na hora, sem fechar as configurações — salva no zquick.json"/>
+                <TextBox x:Name="SetHotkey" Width="170" HorizontalAlignment="Left" FontFamily="Cascadia Mono, Consolas"/>
+              </DockPanel>
+              <TextBlock x:Name="SetHkStatus" Foreground="#9A9AA5" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
               <TextBlock Text="maxTokens (teto da resposta)" Foreground="#9A9AA5" FontSize="11" Margin="0,12,0,4"/>
               <TextBox x:Name="SetMaxTok" Width="100" FontFamily="Cascadia Mono, Consolas"/>
               <CheckBox x:Name="SetCache" Content="cache de prompt (cache_control no system+tools)" Foreground="#E8E8EC" Margin="0,14,0,0"/>
@@ -4563,7 +4590,7 @@ function Show-Settings {
         [xml]$sx = Theme-Xaml $sxStr
         $sw = [System.Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($sx))
         $g = @{}
-        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetWiz','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetScrollStyle','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetAutoUpd','SetUpdCheck','SetUpdStatus','SetStatus','SetApply','SetCancel') {
+        foreach ($n in 'SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetWiz','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetScrollStyle','SetPrevHost','SetThemeName','SetThemeSave','SetThemeList','SetThemeLoad','SetThemeDel','SetSearch','SetHotkey','SetHkApply','SetHkStatus','SetMaxTok','SetCache','SetHideBlur','SetSys','SetAutoUpd','SetUpdCheck','SetUpdStatus','SetStatus','SetApply','SetCancel') {
             $g[$n] = $sw.FindName($n)
         }
         Add-OpacityWheel $sw   # Ctrl+roda funciona tambem com o dialogo aberto/em cima
@@ -4574,6 +4601,7 @@ function Show-Settings {
         $g['SetProfile'].SelectedItem = [string]$cfg.profile
         $g['SetSearch'].ItemsSource = @('zai-server', 'bing', 'zai')
         $g['SetSearch'].SelectedItem = [string]$cfg.searchEngine
+        $g['SetHotkey'].Text = [string]$cfg.hotkey   # v3.26: atalho agora editável no ⚙→Geral
         $g['SetFont'].ItemsSource = @('Cascadia Mono, Consolas', 'Cascadia Code, Consolas', 'Consolas', 'Courier New', 'Segoe UI', 'JetBrains Mono, Consolas')
         $g['SetFont'].Text = "$(if ($cfg.answerFont) { [string]$cfg.answerFont } else { 'Cascadia Mono, Consolas' })"
         $g['SetFontSize'].Text = [string]$(if ($cfg.answerFontSize) { [int]$cfg.answerFontSize } else { 13 })
@@ -4892,8 +4920,17 @@ function Show-Settings {
             }
         })
 
-        # v3.19: assistente de configuração — conexão, benchmark dos modelos, recomendação, autostart, atalho
+        # v3.19: assistente de configuração — conexão, benchmark dos modelos, recomendação, autostart
         $g['SetWiz'].Add_Click({ try { Show-SetupWizard $true } catch { Log "wizard(config): $_" } })
+        # v3.26: arma o atalho ao vivo direto do ⚙ (não precisa fechar nem dar ✔ Aplicar)
+        $g['SetHkApply'].Add_Click({
+            try {
+                $hkv = [string]$script:setG['SetHotkey'].Text.Trim().ToLower()
+                $arm = Arm-Hotkey $hkv
+                if ($arm.ok) { $cfg.hotkey = $hkv; Save-Config; $script:setG['SetHkStatus'].Text = "✔ '$hkv' armado e salvo" }
+                else { $cfg.hotkey = 'alt+q'; Save-Config; $script:setG['SetHkStatus'].Text = "$($arm.note) — salvei alt+q" }
+            } catch { $script:setG['SetHkStatus'].Text = "✕ não armou: $_" }
+        })
         # v3.20: procura manual de atualização (o resultado vem no SetUpdStatus/na janela)
         $g['SetUpdCheck'].Add_Click({
             try {
@@ -4959,6 +4996,15 @@ function Show-Settings {
                 })
                 # geral
                 $cfg.searchEngine = [string]$script:setG['SetSearch'].SelectedItem
+                # v3.26: atalho de abrir a janela — valida/rearma ao vivo no ✔ Aplicar
+                $hkv = [string]$script:setG['SetHotkey'].Text.Trim().ToLower()
+                if ($hkv -and $hkv -ne [string]$cfg.hotkey) {
+                    try {
+                        $arm = Arm-Hotkey $hkv
+                        if ($arm.ok) { $cfg.hotkey = $hkv }
+                        else { $cfg.hotkey = 'alt+q'; $bad += "atalho '$hkv' ocupado (ficou alt+q)" }
+                    } catch { $bad += 'atalho (modificador+tecla, ex.: alt+q)' }
+                }
                 $mt = 0
                 if ([int]::TryParse($script:setG['SetMaxTok'].Text.Trim(), [ref]$mt) -and $mt -ge 512 -and $mt -le 32768) { $cfg.maxTokens = $mt }
                 else { $bad += 'maxTokens (512-32768)' }
@@ -5592,6 +5638,38 @@ function Get-HotkeySpec([string]$s) {
     [pscustomobject]@{ Mods = [uint32]$mods; Vk = [uint32][int][char]::ToUpper($key[0]) }
 }
 
+# v3.26: (re)arma o atalho global ao vivo — botão "armar" do ⚙→Geral e o ✔ Aplicar.
+# Mesmo caminho do boot: RegisterHotKey id 1; combo com Win que falhe tenta o hook
+# LL; se ainda assim não der, cai pro alt+q (id 2) e devolve aviso em .note.
+function Arm-Hotkey([string]$hk) {
+    $parts = @($hk -split '\+' | ForEach-Object { $_.Trim().ToLower() })
+    if ($parts.Count -lt 2) { throw 'precisa de modificador + tecla (ex.: alt+q)' }
+    if ($parts[-1] -in 'win','ctrl','shift','alt') { throw 'faltou a tecla final (ex.: alt+q)' }
+    foreach ($p in $parts) {
+        if ($p -in 'win','ctrl','shift','alt') { continue }
+        if ($p.Length -eq 1 -and $p -match '[a-z0-9]') { continue }
+        throw "token inválido: '$p'"
+    }
+    $src = [System.Windows.Interop.HwndSource]::FromVisual($window)
+    [void][Native.Hotkey]::UnregisterHotKey($src.Handle, 1)
+    [void][Native.Hotkey]::UnregisterHotKey($src.Handle, 2)
+    [void][ZQuick.Hook]::Uninstall()
+    $spec = Get-HotkeySpec $hk
+    $ok = [Native.Hotkey]::RegisterHotKey($src.Handle, 1, $spec.Mods, $spec.Vk)
+    if (-not $ok -and ($hk -match '(^|\+)win(\+|$)')) {
+        $ok = [ZQuick.Hook]::Install($hk, { Toggle-Window })
+        Log ("LL hook '{0}' -> {1}" -f $hk, $ok)
+    }
+    if (-not $ok) {
+        $spec2 = Get-HotkeySpec 'alt+q'
+        [void][Native.Hotkey]::RegisterHotKey($src.Handle, 2, $spec2.Mods, $spec2.Vk)
+        Log ('atalho {0} ocupado — fallback alt+q' -f $hk)
+        return @{ ok = $false; note = "'$hk' ocupado — seguindo com Alt+Q" }
+    }
+    Log ("atalho '{0}' (re)armado -> {1}" -f $hk, $ok)
+    return @{ ok = $true; note = "✔ '$hk' armado" }
+}
+
 $window.Add_SourceInitialized({
     $src = [System.Windows.Interop.HwndSource]::FromVisual($window)
     $src.AddHook({ param($hwnd, $msg, $w, $l, [ref]$handled)
@@ -6008,6 +6086,18 @@ $AskOtherBtn.Add_Click({
 })
 $AskCancelBtn.Add_Click({ Log 'ask: cancelada (botão)'; Send-AskAnswer $null })
 
+# v3.26: barra "sem chave" no corpo do chat — aparece quando o perfil ativo não tem
+# apiKey (nem o fallback do settings.json do Claude Code). Chamada junto com
+# Update-ModelBox: boot, troca de perfil, fim do wizard, zquick.setup e ⚙→Aplicar.
+function Update-NoKeyBar {
+    try {
+        $k = [string](Get-ActiveProfile).apiKey
+        if (-not $k -and $sj) { $k = [string]$sj.env.ANTHROPIC_AUTH_TOKEN }
+        $NoKeyBar.Visibility = $(if ($k) { 'Collapsed' } else { 'Visible' })
+        Log ('sem-chave: {0}' -f $(if ($k) { 'chave presente — barra escondida' } else { 'SEM chave — barra visivel' }))
+    } catch { Log ('sem-chave: erro ' + $_) }
+}
+
 function Update-ModelBox {
     $p = Get-ActiveProfile
     $items = @()
@@ -6024,6 +6114,7 @@ function Update-ModelBox {
     $ModelBox.SelectedItem = $sel
     $script:modelLabel = $sel
     Update-CtxMeter
+    Update-NoKeyBar   # v3.26: sem chave no perfil? mostra o CTA do assistente
 }
 $ModelBox.Add_SelectionChanged({
     $sel = [string]$ModelBox.SelectedItem
@@ -6580,45 +6671,6 @@ function Wz-Bench {
     }
 }
 
-function Wz-HkString {
-    $g = $script:wzG
-    $s = ''
-    if ($g['WzHkCtrl'].IsChecked)  { $s += 'ctrl+' }
-    if ($g['WzHkAlt'].IsChecked)   { $s += 'alt+' }
-    if ($g['WzHkShift'].IsChecked) { $s += 'shift+' }
-    $k = ([string]$g['WzHkKey'].Text).Trim()
-    if (-not $k) { $k = 'q' }
-    $s + $k.ToLower()
-}
-
-# sonda: registra a combinacao no hwnd do PROPRIO wizard (id 7, nunca usado pelo app)
-# — se registrar, esta livre; se falhar, ou e' o atalho atual do app (ele o segura) ou esta ocupado
-function Wz-HkTest {
-    $g = $script:wzG
-    try {
-        $mods = 0
-        if ($g['WzHkCtrl'].IsChecked)  { $mods += 2 }
-        if ($g['WzHkAlt'].IsChecked)   { $mods += 1 }
-        if ($g['WzHkShift'].IsChecked) { $mods += 4 }
-        if (-not $mods) { $g['WzHkStatus'].Text = '⚠ marque pelo menos um modificador (Ctrl/Alt/Shift)'; return }
-        $k = ([string]$g['WzHkKey'].Text).Trim()
-        if (-not $k) { $g['WzHkStatus'].Text = '⚠ digite a tecla (ex.: Q)'; return }
-        $vk = [uint32][int][char]::ToUpper($k[0])
-        if (-not $script:wzHwnd -or $script:wzHwnd -eq [IntPtr]::Zero) {
-            $script:wzHwnd = ([System.Windows.Interop.HwndSource]::FromVisual($script:wzWin)).Handle
-        }
-        $ok = [Native.Hotkey]::RegisterHotKey($script:wzHwnd, 7, [uint32]$mods, $vk)
-        if ($ok) {
-            [void][Native.Hotkey]::UnregisterHotKey($script:wzHwnd, 7)
-            $g['WzHkStatus'].Text = ('✔ {0} está livre — vai funcionar' -f (Wz-HkString))
-        } elseif ((Wz-HkString) -eq [string]$cfg.hotkey) {
-            $g['WzHkStatus'].Text = '✔ é o atalho ATUAL do ZQuick (ele mesmo o segura) — pode manter'
-        } else {
-            $g['WzHkStatus'].Text = ('✕ {0} está ocupado por outro programa — tente outra combinação' -f (Wz-HkString))
-        }
-    } catch { $script:wzG['WzHkStatus'].Text = '✕ teste: ' + $_.Exception.Message }
-}
-
 function Wz-GoStep([int]$n) {
     $g = $script:wzG; $st = $script:wzSt
     $n = [Math]::Max(1, [Math]::Min(4, $n))
@@ -6650,7 +6702,7 @@ function Wz-Summary {
         ('  visão  (prints): {0}' -f $(if ($vis) { $vis } else { '—' })),
         ('modo auto: {0}' -f $(if ($g['WzModelAuto'].IsChecked) { 'sim' } else { 'não' })),
         ('iniciar com o Windows: {0}' -f $(if ($g['WzAuto'].IsChecked) { 'sim' } else { 'não' })),
-        ('atalho: {0}' -f (Wz-HkString)),
+        ('atalho: {0} (⚙ → Geral)' -f [string]$cfg.hotkey),
         ('janela: {0}' -f $(if ($g['WzCenter'].IsChecked) { 'centralizada' } else { 'última posição usada' }))
     ) -join "`n")
 }
@@ -6673,25 +6725,7 @@ function Wz-Finish {
         if ($st.big)    { Set-CfgProp $p 'bigModel'    ([string]$st.big) }
         if ($st.vision) { Set-CfgProp $p 'visionModel' ([string]$st.vision) }
         if ($g['WzModelAuto'].IsChecked) { $cfg.model = 'auto' }
-        # atalho: se mudou, re-arma no hwnd da janela principal (ids 1/2)
-        if (-not ($g['WzHkCtrl'].IsChecked -or $g['WzHkAlt'].IsChecked -or $g['WzHkShift'].IsChecked)) { $g['WzHkAlt'].IsChecked = $true }
-        $hk = Wz-HkString
-        if ($hk -ne [string]$cfg.hotkey) {
-            $cfg.hotkey = $hk
-            try {
-                $src = [System.Windows.Interop.HwndSource]::FromVisual($window)
-                [void][Native.Hotkey]::UnregisterHotKey($src.Handle, 1)
-                [void][Native.Hotkey]::UnregisterHotKey($src.Handle, 2)
-                $sp = Get-HotkeySpec $hk
-                $okHk = [Native.Hotkey]::RegisterHotKey($src.Handle, 1, $sp.Mods, $sp.Vk)
-                if (-not $okHk) {
-                    $sp2 = Get-HotkeySpec 'alt+q'
-                    [void][Native.Hotkey]::RegisterHotKey($src.Handle, 2, $sp2.Mods, $sp2.Vk)
-                    $StatusText.Text = 'atalho ' + $hk + ' ocupado — seguindo com Alt+Q'
-                }
-                Log ('wizard: atalho trocado para {0} (registro {1})' -f $hk, $okHk)
-            } catch { Log ('wizard: re-arm do atalho falhou: ' + $_.Exception.Message) }
-        }
+        # v3.26: atalho NÃO muda mais pelo assistente — configura no ⚙ → Geral (Arm-Hotkey)
         Set-ZQAutostart ([bool]$g['WzAuto'].IsChecked)
         $cfg.window.center = [bool]$g['WzCenter'].IsChecked
         Save-Config
@@ -6702,7 +6736,7 @@ function Wz-Finish {
         $StatusText.Text = '✔ configurado pelo assistente'
         Log ('wizard: configurado (perfil={0} modelos={1} auto={2} autostart={3} atalho={4} centro={5})' -f `
             $cfg.profile, $(if ($st.ids) { @($st.ids).Count } else { 0 }), [bool]$g['WzModelAuto'].IsChecked, `
-            [bool]$g['WzAuto'].IsChecked, [string]$cfg.hotkey, [bool]$g['WzCenter'].IsChecked)
+            [bool]$g['WzAuto'].IsChecked, [string]$cfg.hotkey, [bool]$g['WzCenter'].IsChecked)   # v3.26: atalho inalterado pelo wizard (só ⚙)
         try { $script:wzWin.DialogResult = $true } catch { try { $script:wzWin.Close() } catch {} }
     } catch {
         Log ('wizard: erro ao salvar: ' + $_.Exception.Message)
@@ -6886,19 +6920,11 @@ function Show-SetupWizard([bool]$first) {
       <StackPanel x:Name="WzP3" Visibility="Collapsed">
         <TextBlock Foreground="#E8E8EC" Text="Iniciar o ZQuick junto com o Windows?" Margin="0,0,0,6"/>
         <CheckBox x:Name="WzAuto" Content="sim — abrir oculto na bandeja a cada logon" Margin="8,0,0,12"/>
-        <TextBlock Foreground="#E8E8EC" Text="Atalho para abrir/ocultar a janela:" Margin="0,0,0,2"/>
-        <TextBlock x:Name="WzHkCur" Foreground="#6E6E7A" FontSize="11" Margin="0,0,0,8"/>
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-          <CheckBox x:Name="WzHkCtrl" Content="Ctrl" MinWidth="62"/>
-          <CheckBox x:Name="WzHkAlt" Content="Alt" MinWidth="62" Margin="8,0,0,0"/>
-          <CheckBox x:Name="WzHkShift" Content="Shift" MinWidth="62" Margin="8,0,0,0"/>
-          <TextBlock Text="+" Foreground="#9A9AA5" VerticalAlignment="Center" Margin="8,0,8,0"/>
-          <TextBox x:Name="WzHkKey" Width="46" MaxLength="1" CharacterCasing="Upper" Text="Q"/>
-        </StackPanel>
-        <TextBlock Foreground="#6E6E7A" FontSize="11" TextWrapping="Wrap"
-                   Text="Marque pelo menos um modificador. Evite o Win: o Windows costuma tomar de volta." Margin="0,0,0,8"/>
-        <Button x:Name="WzHkTest" Content="Testar atalho" HorizontalAlignment="Left"/>
-        <TextBlock x:Name="WzHkStatus" Foreground="#9A9AA5" Margin="0,8,0,0" Text=""/>
+        <!-- v3.26: o atalho saiu do assistente — agora é ⚙ → Geral, campo "atalho de abrir a janela" -->
+        <Border Background="#16161A" BorderBrush="#3A3A44" BorderThickness="1" CornerRadius="4" Padding="10,8">
+          <TextBlock Foreground="#9A9AA5" TextWrapping="Wrap" FontSize="12"
+                     Text="Atalho de abrir/ocultar a janela: configure depois em ⚙ → Geral → “atalho de abrir a janela” (botão armar testa na hora). Padrão do ZQuick: alt+q."/>
+        </Border>
       </StackPanel>
       <StackPanel x:Name="WzP4" Visibility="Collapsed">
         <TextBlock Foreground="#E8E8EC" Text="Confira o resumo e conclua:" Margin="0,0,0,8"/>
@@ -6917,8 +6943,8 @@ function Show-SetupWizard([bool]$first) {
         $g = @{}
         foreach ($n in 'WzClose','WzStep','WzP1','WzP2','WzP3','WzP4','WzUrl','WzKey','WzTest','WzConn',
                        'WzPrZai','WzPrKimi','WzPrDeepseek','WzPrOllama','WzPrLmstudio','WzPrLlama','WzPrOutro','WzKeyLabel',
-                       'WzBench','WzBenchStatus','WzBenchList','WzRec','WzAuto','WzHkCur','WzHkCtrl','WzHkAlt',
-                       'WzHkShift','WzHkKey','WzHkTest','WzHkStatus','WzCenter','WzModelAuto','WzSum',
+                       'WzBench','WzBenchStatus','WzBenchList','WzRec','WzAuto',
+                       'WzCenter','WzModelAuto','WzSum',
                        'WzBack','WzNext','WzFinish') {
             $g[$n] = $wz.FindName($n)
         }
@@ -6929,13 +6955,6 @@ function Show-SetupWizard([bool]$first) {
         try { $g['WzUrl'].Text = (Resolve-ProfileAuth (Get-ActiveProfile)).base } catch { $g['WzUrl'].Text = 'https://api.z.ai/api/anthropic' }
         $g['WzKey'].Clear()
         $g['WzAuto'].IsChecked = Get-ZQAutostart
-        $cur = [string]$cfg.hotkey
-        $g['WzHkCur'].Text = 'atual: ' + $cur
-        if ($cur -match '(^|\+)ctrl+')  { $g['WzHkCtrl'].IsChecked = $true }
-        if ($cur -match '(^|\+)alt+')   { $g['WzHkAlt'].IsChecked = $true }
-        if ($cur -match '(^|\+)shift+') { $g['WzHkShift'].IsChecked = $true }
-        $kk = ([string](($cur -split '\+')[-1])).Trim()
-        if ($kk) { $g['WzHkKey'].Text = $kk.ToUpper() }
         $g['WzCenter'].IsChecked = [bool]$cfg.window.center
         $g['WzModelAuto'].IsChecked = (([string]$cfg.model) -eq 'auto')
         # v3.24: marca o preset que casa com a base atual (ou nenhum — URL editada/outra)
@@ -6956,7 +6975,6 @@ function Show-SetupWizard([bool]$first) {
         $g['WzPrOutro'].Add_Click({ Wz-PickProvider 'outro' })
         $g['WzTest'].Add_Click({ Wz-TestConn })
         $g['WzBench'].Add_Click({ Wz-Bench })
-        $g['WzHkTest'].Add_Click({ Wz-HkTest })
         $g['WzBack'].Add_Click({ Wz-GoStep ([int]$script:wzSt.step - 1) })
         $g['WzNext'].Add_Click({
             if ($script:wzSt.step -eq 1 -and -not $script:wzSt.ok) {

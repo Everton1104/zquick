@@ -117,6 +117,7 @@ imagens.
 | `57860a8` | v3.25 (Onda 7) — `git_status/diff/log` (repo > `_shCwd` > cwd, valida `.git`) + `git_commit` no GateConfirm; `file_grep` com `mode:"files"/"count"`, `context:0-3` (grupos separados por `--`) e `max:1-200`; `todo_write` + painel 📋 (○ ●accent ✔riscado, `/uitest todo2` cobre o drain; lição: `.clear` em array do ConvertFrom-Json resolve para IList.Clear — PSMethod truthy — checar `-is [PSCustomObject]` antes) |
 | — | v3.26 (Onda 8) — **hooks** (`PreToolUse` exit 2 = nega com motivo no tool_result / exit 0 = aprova por política e pula o GateConfirm (`_hookAllow`), `PostToolUse`/`TurnEnd` async fire-and-forget, payload JSON no stdin via Task, 20s timeout fail-open); **slash commands** (`commands\nome.md` → `/nome args`, `$ARGUMENTS`, aninhamento ≤3, desconhecido avisa e **return** — o `break` sozinho caía no envio); **fallback de modelo** (cadeia model → fast → big → `modelFallback` do json, dedupe; após esgotar as 4 tentativas troca `fbIdx`/`_modelSave` e reconstrói o body, `CurModel` restaurado no finally) |
 | — | v3.26 (parte 2 — pedidos do teste do instalador) — **moldura estreita**: ▢/▢✕/✕ num `StackPanel` próprio dockado à direita do painel externo (barra de título vira `WrapPanel` sem os botões — não somem mais quando a janela encolhe); **licença de verdade** no MSI (`kit\licenca.rtf` renderizado no diálogo autoral `ZQLicenseDlg`); **chave da API no instalador** (`ZQKeyDlg` pergunta Base URL + chave → CA imediata empacota `DIR/ZQKEY/ZQBASE` no CustomActionData + CA deferida `ZQWriteSetup` (VBScript, impersonate) grava `zquick.setup` no INSTALLDIR → o app consome no boot: mapeia o perfil do domínio, salva a config, apaga o arquivo e varre os modelos num timer 4s — abre funcionando, sem assistente; a chave nunca vai na linha de comando) |
+| — | v3.26 (parte 3 — onboarding sem-chave + atalho no lugar certo) — 🧙 vira **botão da toolbar**; **barra "sem chave" no corpo do chat** (`NoKeyBar` acima do composer, visível quando o perfil ativo não tem `apiKey` nem o fallback do `~/.claude/settings.json`; atualiza junto com `Update-ModelBox`); **atalho sai do assistente e vira campo do ⚙ → Geral** (`SetHotkey` + botão **armar** que registra NA HORA via `Arm-Hotkey`: valida tokens, solta ids 1/2 e o hook LL, RegisterHotKey id 1, combo Win tenta hook, senão cai pro alt+q e avisa no `SetHkStatus`; `Hook.Uninstall()` novo); **padrão de fábrica volta a `alt+q`** (era `win+c` herança do AHK); wizard etapa 3 fica só com autostart + plaquinha apontando pro ⚙ |
 
 ## Notas de engenharia (lições)
 
@@ -252,3 +253,32 @@ imagens.
   o instalador ficou parado no resumo até o timeout.
 - PS 5.1: **função chamada `Where` colide com o alias** `where` —
   silencia (não roda e não erroa); renomear.
+
+### v3.26 parte 3 — lições
+
+- **`Border` e `StackPanel` não têm AutomationPeer** (Decorator/Panel,
+  não `Control`): nunca aparecem no UIA, nem por `x:Name` — o assert tem
+  que mirar num **Controle de dentro** (botão/texto). E o `FindFirst`
+  padrão desce a **raw view**, que expõe elemento recolhido
+  (`Visibility=Collapsed`) como **`IsOffscreen=true`** — presença não
+  prova visibilidade; o critério certo é `IsOffscreen -eq $false`
+  (descoberto na `NoKeyBar`: presente no UIA mesmo "escondida").
+- **`alt+z` é da NVIDIA** (overlay GeForce) na máquina de teste — o
+  `Arm-Hotkey` fez o desenhado (fallback alt+q + aviso), mas o E2E que
+  esperava "armado" falhava; combo de teste tem que ser raro
+  (`ctrl+alt+z`).
+- **Trap do E2E que só envia Esc deixa o app VIVO com os diálogos
+  abertos** — o re-run seguinte abre OUTRO ⚙/outro wizard no MESMO
+  processo e o assert de "wizard fechou" vê o wizard velho: dumpar os
+  nomes das janelas no throw revelou `configurações ×4` acumuladas.
+  Run de E2E de wizard: matar o processo antes de cada tentativa.
+- **`PropertyCondition` 3-arg no PS 5.1** (`MatchSubstring`) não casa
+  overload via `New-Object` — enumerar e filtrar no PowerShell.
+- **Teste em janela sem acento**: nome de janela com `—`/acentos em
+  script 5.1 vira mojibake (ANSI) e o match falha — casar por substring
+  ASCII (`'*busca*'`).
+- **Sem-chave visível**: o fallback `~/.claude/settings.json` só existe
+  na máquina dev — para E2E do ramo "sem chave nenhuma" basta bootar o
+  app com `$env:USERPROFILE` apontando pra um diretório vazio (o
+  fallback é o ÚNICO uso de USERPROFILE no app; config/histórico são
+  appDir-based). O filho herda o env do `Start-Process`.

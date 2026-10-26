@@ -86,7 +86,7 @@ function Get-ToggleState([string]$id) {
 }
 
 $mark0 = [IO.File]::ReadAllText($log).Length
-trap { for ($i = 0; $i -lt 3; $i++) { Tap 0x1B; Start-Sleep -Milliseconds 400 }; throw }
+trap { "ERRO(original): $_"; for ($i = 0; $i -lt 3; $i++) { Tap 0x1B; Start-Sleep -Milliseconds 400 }; throw }
 
 # ---- 1. abre config -> botao do assistente (aba Perfil, a primeira) ----
 $win = Get-MainWin
@@ -134,11 +134,18 @@ $rec = Get-Text 'WzRec'
 if ($rec -notmatch ('r' + [char]0xE1 + 'pido')) { throw "recomendacao vazia: '$rec'" }
 "recomendacao ok (2 linhas+)"
 
-# ---- 5. etapa 3 (preferencias): existe autostart + atalho ----
+# ---- 5. etapa 3 (preferencias): autostart existe; atalho SAIU do wizard (v3.26) ----
 $null = Invoke-ById $wz 'WzNext'
 $null = Get-ToggleState 'WzAuto'   # existe e exposto
-$null = Get-Text 'WzHkCur'
-'autostart + atalho presentes na etapa 3'
+# v3.26: atalho agora e so no config (⚙ -> Geral); etapa 3 mostra aviso apontando pra la
+# (WzP3 e StackPanel = sem AutomationPeer -> varre os textos do wizard todo; o aviso
+#  "configure depois" e unico, o resumo da etapa 4 ainda esta vazio aqui)
+$txtCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)
+$tx = @($wz.FindAll([System.Windows.Automation.TreeScope]::Descendants, $txtCond))
+"etapa 3: $($tx.Count) textos"
+$hkNote = @($tx | ForEach-Object { [string]$_.Current.Name } | Where-Object { $_ -match 'configure depois' } | Select-Object -First 1)
+if (-not $hkNote) { throw 'etapa 3 sem aviso do atalho (apontando pro config)' }
+'autostart presente + aviso do atalho (config/⚙) na etapa 3'
 
 # ---- 6. etapa 4: resumo + garante modelo-auto e autostart OFF (nao mexe no usuario) ----
 $null = Invoke-ById $wz 'WzNext'
@@ -168,7 +175,10 @@ while ((Get-Date) -lt $dl) {
     if (-not $still) { break }
     Start-Sleep -Milliseconds 500
 }
-if ($still) { throw 'wizard nao fechou apos Concluir (12s)' }
+if ($still) {
+    $names = (Find-Wins | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Window } | ForEach-Object { "'$($_.Current.Name)'" }) -join ' | '
+    throw "wizard nao fechou apos Concluir (12s) — janelas: $names"
+}
 'wizard concluido e fechado'
 
 # fecha o config e confere que o app segue vivo
