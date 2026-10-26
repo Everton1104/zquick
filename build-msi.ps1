@@ -46,6 +46,12 @@ foreach ($e in @($candle, $light)) { if (-not (Test-Path $e)) { throw "WiX incom
 #      nosso e' deterministico. Quebras CR/LF nao importam pro RTF (so' \par).
 $rtf = [IO.File]::ReadAllText((Join-Path $root 'kit\licenca.rtf'))
 $rtf = ($rtf -replace '\r?\n', '').Trim()
+# LICAO (2a rodada do 3.26): \par colado em LETRA pos-flatten = control word
+# desconhecida ("\parVoc") que o renderizador descarta INTEIRA - comia o
+# comeco do paragrafo ("Voc"/"N"/"O ") e a propria quebra. Todo \par de fim
+# de linha no kit\licenca.rtf termina com espaco (delimitador consumido).
+# (?!d) = nao confundir com \pard, que comeca igual.
+if ($rtf -match '\\par(?!d)[A-Za-z]') { throw 'kit\licenca.rtf: \par colado em letra apos achatar - termine o \par com espaco' }
 if ($rtf -notmatch '\\rtf1' -or $rtf -notmatch 'ZQUICK') { throw 'kit\licenca.rtf invalido (nao e RTF ou sem o marcador ZQUICK)' }
 $rtfXml = $rtf.Replace('&', '&amp;').Replace('<', '&lt;').Replace('"', '&quot;')
 
