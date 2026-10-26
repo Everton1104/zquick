@@ -26,7 +26,13 @@ if (-not (Test-Path $ico)) {
     "icone: $ico"
 }
 
+# versao do exe = appVer do zquick.ps1 (3 partes, ex. 3.24.1) — bate com o MSI
+$src = Get-Content (Join-Path $dir 'zquick.ps1') -Raw
+if ($src -notmatch "appVer\s*=\s*'([0-9.]+)'") { throw 'nao achei appVer no zquick.ps1' }
+$ver = $Matches[1]
+if ($ver -match '^(\d+)\.(\d+)$') { $ver = "$ver.0" }
+
 Invoke-PS2EXE -inputFile (Join-Path $dir 'zquick.ps1') -outputFile (Join-Path $dir 'zquick.exe') `
-    -noConsole -STA -iconFile $ico -title 'ZQuick' -description 'Busca rapida com LLM' -version '1.0.0' -DPIAware
+    -noConsole -STA -iconFile $ico -title 'ZQuick' -description 'Busca rapida com LLM' -version $ver -DPIAware
 
 Get-Item (Join-Path $dir 'zquick.exe') | ForEach-Object { "exe: {0} ({1:N0} bytes)" -f $_.FullName, $_.Length }
