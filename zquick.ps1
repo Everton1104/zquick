@@ -3694,6 +3694,17 @@ function Send-Current {
         Log 'uitest: todo'
         return
     }
+    if ($text -eq '/uitest todo2') {
+        # v3.25: idem mas pelo caminho REAL — enfileira UiMsg e deixa o drain fazer
+        # o parse (E2E do bug: '$c.clear' truthy em array escondia o painel)
+        $InputBox.Clear()
+        $u = [ZQuick.UiMsg]::new()
+        $u.Type = 'todo'
+        $u.Text = '[{"content":"via drain (uitest)","status":"in_progress"}]'
+        $queue.Enqueue($u)
+        Log 'uitest: todo2'
+        return
+    }
     if ($text -eq '/uitest at') {
         # hook E2E do dialogo de mencao: chars INJETADOS nao viram texto nesta
         # sessao (TSF descarta input injetado — so' keydown puro chega), então
@@ -5240,7 +5251,9 @@ $timer.Add_Tick({
             }
             'todo' {   # v3.25: checklist do turno (todo_write) — array de itens ou {"clear":true}
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("todo-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
-                if ($c -and $c.clear) { $TodoBar.Visibility = 'Collapsed' }
+                # lição (E2E): '$c.clear' em ARRAY resolve p/ o método IList.Clear() (PSMethod truthy)
+                # e todo checklist caía no ramo 'limpar' — conferir o TIPO antes de olhar .clear
+                if ($c -is [System.Management.Automation.PSCustomObject] -and $c.clear) { $TodoBar.Visibility = 'Collapsed' }
                 elseif ($c) { Show-Todo @($c) }
             }
             'confirm' {
