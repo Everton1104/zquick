@@ -27,7 +27,7 @@ function Check-Xaml([string]$xaml, [string[]]$names, [string]$rotulo) {
     "$rotulo : OK ($($names.Count) elementos)"
 }
 
-Check-Xaml $main @('ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') 'janela principal'   # CopyBtn: runtime (Add-CopyIcon, v3.14)
+Check-Xaml $main @('ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmYes','ConfirmNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','TodoBar','TodoHeader','TodoHide','TodoScroll','TodoItems','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') 'janela principal'   # CopyBtn: runtime (Add-CopyIcon, v3.14) · TodoBar: v3.25 (todo_write)
 Check-Xaml $hist @('Search','List','CountText','DelBtn','OkBtn','HistClose') 'dialogo historico'
 Check-Xaml $setx @('SetClose','SetProfile','SetKey','SetBase','SetFast','SetBig','SetVision','SetModels','SetListModels','SetW','SetH','SetCenter','SetTop','SetOpacity','SetOpVal','SetFont','SetFontSize','SetColors','SetResetColors','SetSearch','SetMaxTok','SetCache','SetHideBlur','SetSys','SetStatus','SetApply','SetCancel') 'dialogo configuracoes'
 'tudo OK'

@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.24.1'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.25.0'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -592,7 +592,7 @@ public static class Hook {
 }
 
 public class UiMsg {
-    public string Type;   // delta | status | sources | confirm | ask | stopped | done | error | note | allow
+    public string Type;   // delta | status | sources | confirm | ask | stopped | done | error | note | allow | todo
     public string Text;
 }
 
@@ -628,6 +628,7 @@ public class Engine {
     readonly List<string> _history = new List<string>();
     readonly object _sync = new object();
     volatile int _busy = 0;
+    public string _shCwd = null;   // Onda 7: último cwd da sessão persistente — default de 'repo' das git tools
     CancellationTokenSource _cts;
     Timer _prewarm;
     // sessao de shell persistente (#3): processo vivo com pipes; cwd/vars/funcoes sobrevivem
@@ -1304,13 +1305,15 @@ public class Engine {
     }
 
     // ---------- execucao das tools do round (Onda 4 #5: leitura em paralelo) ----------
-    // Somente-leitura (web_search/fetch_page/file_list/file_read/file_grep) roda
-    // EM PARALELO (Task por bloco); o resto (mutantes com confirm, run_ps, ask_user,
-    // plan, escalate, mcp_*) roda serial na thread do turno. Os tool_results voltam
+    // Somente-leitura (web_search/fetch_page/file_list/file_read/file_grep e as
+    // git_status/git_diff/git_log de leitura) roda EM PARALELO (Task por bloco);
+    // o resto (mutantes com confirm, run_ps, ask_user, plan, todo_write, escalate,
+    // mcp_*) roda serial na thread do turno. Os tool_results voltam
     // SEMPRE na ordem original dos blocos — os ids tem que casar com os tool_use.
     public static bool Parallelizable(string name) {
         return name == "web_search" || name == "fetch_page" || name == "file_list"
-            || name == "file_read" || name == "file_grep";
+            || name == "file_read" || name == "file_grep"
+            || name == "git_status" || name == "git_diff" || name == "git_log";
     }
 
     public string ExecTools(List<Blk> blocks, CancellationToken ct) {
@@ -1408,6 +1411,9 @@ public class Engine {
             tools.Add("{\"name\":\"file_list\",\"description\":\"List files and folders of a directory on the user's Windows.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}}");
             tools.Add("{\"name\":\"file_read\",\"description\":\"Read a text file from the user's Windows (first 8000 chars).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}");
             tools.Add("{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (recursive): matching lines as file:line: text.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"glob\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}}");
+            tools.Add("{\"name\":\"git_status\",\"description\":\"Git working tree status (branch + changed files) of a repository.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"absolute repository path\"}}}}");
+            tools.Add("{\"name\":\"git_diff\",\"description\":\"Git diff of a repository (staged:true = --cached); optional path filter.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"absolute repository path\"},\"staged\":{\"type\":\"boolean\"},\"path\":{\"type\":\"string\"}}}}");
+            tools.Add("{\"name\":\"git_log\",\"description\":\"Last commits of a repository (oneline list).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"absolute repository path\"},\"n\":{\"type\":\"number\"},\"path\":{\"type\":\"string\"}}}}");
         }
         string m = !_auto ? _model : (_useBig ? _big : _model);
         return "{\"model\":\"" + m + "\",\"max_tokens\":" + _maxTokens + ",\"stream\":true,\"system\":" + J(sys)
@@ -1675,7 +1681,11 @@ public class Engine {
         tools.Add("{\"name\":\"fetch_page\",\"description\":\"Fetch one web page by absolute http(s) URL and return its readable text (truncated). Use to read details of a promising search result.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"absolute http or https URL\"}},\"required\":[\"url\"]}}");
         tools.Add("{\"name\":\"file_list\",\"description\":\"List files and folders of a directory on the user's Windows.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute directory path (empty = user home)\"}}}}");
         tools.Add("{\"name\":\"file_read\",\"description\":\"Read a text file from the user's Windows (first 8000 chars).\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"}},\"required\":[\"path\"]}}");
-        tools.Add("{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (content search, recursive): returns the matching lines as file:line: text. Use it to find where a term/name/config is defined or used — far cheaper than reading files one by one.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"text or regular expression to find in file contents\"},\"path\":{\"type\":\"string\",\"description\":\"absolute folder path to search in (empty = user home)\"},\"glob\":{\"type\":\"string\",\"description\":\"filename filter like *.ps1 or *.txt (empty = all files)\"}},\"required\":[\"pattern\"]}}");
+        tools.Add("{\"name\":\"file_grep\",\"description\":\"Search INSIDE files of a folder (content search, recursive). Default mode returns matching lines as file:line: text. mode:'files' lists only the FILE PATHS that match (cheapest way to find WHERE something lives); mode:'count' returns match counts per file. context:N (0-3) adds N surrounding lines around each match (content mode). max:K caps matches (1-200, default 50). Use it to find where a term/name/config is defined or used — far cheaper than reading files one by one.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"text or regular expression to find in file contents\"},\"path\":{\"type\":\"string\",\"description\":\"absolute folder path to search in (empty = user home)\"},\"glob\":{\"type\":\"string\",\"description\":\"filename filter like *.ps1 or *.txt (empty = all files)\"},\"mode\":{\"type\":\"string\",\"description\":\"content (default) | files | count\"},\"context\":{\"type\":\"number\",\"description\":\"lines of context around each match, 0-3 (content mode only)\"},\"max\":{\"type\":\"number\",\"description\":\"max matches to return, 1-200 (default 50)\"}},\"required\":[\"pattern\"]}}");
+        tools.Add("{\"name\":\"git_status\",\"description\":\"Show the working tree status of a git repository: current branch (and ahead/behind), plus staged/unstaged/untracked files. Read-only — runs in parallel with other reads.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"absolute path of the repository folder (omit = last shell cwd)\"}}}}");
+        tools.Add("{\"name\":\"git_diff\",\"description\":\"Show the git diff of a repository (what changed, how). staged:true shows what is already staged (--cached). Optional path limits to a file/subfolder. Read-only — runs in parallel with other reads.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"absolute path of the repository folder (omit = last shell cwd)\"},\"staged\":{\"type\":\"boolean\",\"description\":\"true = staged changes (--cached)\"},\"path\":{\"type\":\"string\",\"description\":\"file or subfolder to limit the diff (relative to repo)\"}}}}");
+        tools.Add("{\"name\":\"git_log\",\"description\":\"Show the last commits of a git repository (hash, date, subject, author). Optional path limits to a file/subfolder. Read-only — runs in parallel with other reads.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"absolute path of the repository folder (omit = last shell cwd)\"},\"n\":{\"type\":\"number\",\"description\":\"how many commits, 1-50 (default 15)\"},\"path\":{\"type\":\"string\",\"description\":\"file or subfolder (relative to repo)\"}}}}");
+        tools.Add("{\"name\":\"git_commit\",\"description\":\"Create a git commit. addAll:true stages everything first (git add -A); paths:[...] stages specific files; neither commits only what is already staged. Requires the user's approval in the app window. Message in Portuguese, imperative style.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"absolute path of the repository folder (omit = last shell cwd)\"},\"message\":{\"type\":\"string\",\"description\":\"commit message\"},\"addAll\":{\"type\":\"boolean\",\"description\":\"stage everything (git add -A) before committing\"},\"paths\":{\"type\":\"array\",\"description\":\"files to stage before committing (relative to repo)\",\"items\":{\"type\":\"string\"}}},\"required\":[\"message\"]}}");
         tools.Add("{\"name\":\"file_edit\",\"description\":\"Surgically replace one exact text snippet inside an existing file (find & replace; the user approves a red/green diff). old_str must match the file EXACTLY, including indentation and line breaks — include surrounding lines to make it unique, or set replace_all:true. new_str empty deletes the snippet. ALWAYS prefer this over file_write for changing an existing file. Previous version kept as <file>.zquick.bak.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"old_str\":{\"type\":\"string\",\"description\":\"exact text to replace, copied from file_read (indentation counts)\"},\"new_str\":{\"type\":\"string\",\"description\":\"replacement text (empty string = delete old_str)\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"true = replace every occurrence of old_str\"}},\"required\":[\"path\",\"old_str\",\"new_str\"]}}");
         tools.Add("{\"name\":\"file_write\",\"description\":\"Create or overwrite a whole text file (any extension). For CHANGING an existing file prefer file_edit (surgical, cheaper, shows a diff). Requires the user's approval; previous version kept as <file>.zquick.bak; result verified by re-reading.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"absolute file path\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}");
         tools.Add("{\"name\":\"file_move\",\"description\":\"Move or RENAME a file or folder. Requires the user's approval in the app window.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\",\"description\":\"absolute source path\"},\"dest\":{\"type\":\"string\",\"description\":\"absolute destination path (full new name)\"}},\"required\":[\"src\",\"dest\"]}}");
@@ -1685,6 +1695,7 @@ public class Engine {
         tools.Add("{\"name\":\"run_ps\",\"description\":\"Run a PowerShell command on the user's Windows (open apps, system settings, processes, checks...). Commands run in ONE PERSISTENT session per conversation: current directory, variables and functions SURVIVE between calls (set $x in one call, read $x in the next). ALWAYS shown to the user for approval before running. Optional 'timeout' in seconds (5-120, default 60). Do NOT delete user files with this (use file_delete). Keep commands short.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"PowerShell command line\"},\"timeout\":{\"type\":\"number\",\"description\":\"max seconds to wait, 5-120 (default 60)\"}},\"required\":[\"command\"]}}");
         tools.Add("{\"name\":\"ask_user\",\"description\":\"Ask the user multiple-choice questions (ONE or up to 4 at once) and wait for their picks. Use when the task has ambiguity or decisions the user should make (which approach, which file, scope, taste, a risky trade-off). Do NOT use it for anything you can decide yourself or verify with file_list/web_search, and never ask the same question twice. Send one question via question/header/multiSelect/options, or several via questions:[{question, header, multiSelect, options}] (max 4). 2-4 options each; each option: short label (1-5 words) + description of what it implies; optional 'preview' (mono text — code snippet, mockup or config shown beside the option; use it when comparing concrete artifacts). The user can always answer free text instead.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"the complete question in Portuguese, specific, ending with ?\"},\"header\":{\"type\":\"string\",\"description\":\"short chip label, max ~12 chars\"},\"multiSelect\":{\"type\":\"boolean\",\"description\":\"true = the user may pick several options\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"description\":\"concise option, 1-5 words\"},\"description\":{\"type\":\"string\",\"description\":\"what choosing this implies\"},\"preview\":{\"type\":\"string\",\"description\":\"mono preview shown beside the option (code/mockup/config)\"}},\"required\":[\"label\"]}},\"questions\":{\"type\":\"array\",\"description\":\"alternative: up to 4 questions at once\",\"items\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"},\"header\":{\"type\":\"string\"},\"multiSelect\":{\"type\":\"boolean\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"preview\":{\"type\":\"string\"}},\"required\":[\"label\"]}}},\"required\":[\"question\",\"options\"]}}},\"required\":[\"question\",\"options\"]}}");
         tools.Add("{\"name\":\"plan\",\"description\":\"Propose a multi-step plan of ACTIONS (create/edit/move/delete files, run commands) and wait for the user's approval ONCE. Approved: every listed action runs in this turn WITHOUT individual confirmations. Rejected: nothing runs. Use when the task needs 3+ steps that alter files or the system. Do NOT use it for read-only exploration or single actions.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\",\"description\":\"short plan title in Portuguese\"},\"steps\":{\"type\":\"array\",\"description\":\"ordered steps, each short (verb + object)\",\"items\":{\"type\":\"string\"}}},\"required\":[\"title\",\"steps\"]}}");
+        tools.Add("{\"name\":\"todo_write\",\"description\":\"Create or update the CHECKLIST of the current task, visible to the user in a live panel. Send the FULL list each time (it replaces the previous). For any task with 3+ steps: call it FIRST with all steps as pending, mark in_progress on the step you are starting, completed as each finishes. Keep each item short (verb + object, in Portuguese), max 12 items.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"todos\":{\"type\":\"array\",\"description\":\"the full checklist\",\"items\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"short step description\"},\"status\":{\"type\":\"string\",\"description\":\"pending | in_progress | completed\"}},\"required\":[\"content\",\"status\"]}}},\"required\":[\"todos\"]}}");
         tools.Add("{\"name\":\"research\",\"description\":\"Spawn a READ-ONLY subagent with its own separate context to investigate and report back a dense summary (paths, values, file:line snippets, URLs). The subagent does NOT see this conversation — write a self-contained task. Use for wide scans (many files/folders, repeated web searches) so this conversation stays clean; NOT worth it for a single quick file_read/web_search.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"complete, self-contained research task in Portuguese: what to find, where to look, what to report\"},\"hint\":{\"type\":\"string\",\"description\":\"optional: where to start (folder path, URL or search term)\"}},\"required\":[\"task\"]}}");
         if (_skills.Count > 0)
             tools.Add("{\"name\":\"skill_read\",\"description\":\"Load the full instructions of one SKILL (a named playbook saved by the user). Call it when the task matches a skill listed in the system prompt, then follow those instructions.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"skill name exactly as listed in the system prompt\"}},\"required\":[\"name\"]}}");
@@ -2007,17 +2018,26 @@ public class Engine {
                 if (string.IsNullOrEmpty(pattern)) return "ERRO: informe 'pattern' (texto ou regex).";
                 if (!Directory.Exists(dir)) return "ERRO: pasta não encontrada: " + dir;
                 if (string.IsNullOrEmpty(glob)) glob = "*";
+                // Onda 7: mode files/count + linhas de contexto + limite ajustavel
+                string mode = (H.S(inp, "mode") ?? "content").ToLowerInvariant();
+                if (mode != "files" && mode != "count") mode = "content";
+                double ctxd = H.N(inp, "context"); int ctx = ctxd >= 0.5 ? Math.Min(3, Math.Max(0, (int)ctxd)) : 0;
+                double maxd = H.N(inp, "max"); int maxHits = maxd >= 1 ? Math.Min(200, (int)maxd) : 50;
                 Regex rx;
                 try { rx = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled); }
                 catch (Exception) { rx = new Regex(Regex.Escape(pattern), RegexOptions.IgnoreCase | RegexOptions.Compiled); }
-                // binarios/imagens: so' gastariam tempo; caps: 50 resultados / 400 arquivos / 8s
+                // binarios/imagens: so' gastariam tempo; caps: content 50 hits/400 arquivos/8s,
+                // files/count 200/800/12 (o objetivo e' achar ONDE, nao ler tudo)
                 string[] skipExt = new string[] { ".exe",".dll",".sys",".png",".jpg",".jpeg",".gif",".bmp",".webp",".ico",".pdf",".zip",".7z",".rar",".msi",".iso",".woff",".woff2",".ttf",".otf",".mp3",".mp4",".avi",".mkv",".mov",".bin",".dat",".pdb" };
+                int maxFiles = mode == "content" ? 400 : 800;
+                double maxSec = mode == "content" ? 8 : 12;
                 var sbG = new StringBuilder();
+                var countSb = new StringBuilder();   // mode count: N\tfile
                 var pending = new Stack<string>();
                 pending.Push(dir);   // pilha manual: pasta sem permissao nao derruba a varredura
-                int matches = 0, files = 0;
+                int matches = 0, files = 0, hitFiles = 0;
                 var swG = System.Diagnostics.Stopwatch.StartNew();
-                while (pending.Count > 0 && matches < 50 && files < 400 && swG.Elapsed.TotalSeconds <= 8) {
+                while (pending.Count > 0 && matches < maxHits && files < maxFiles && swG.Elapsed.TotalSeconds <= maxSec) {
                     string d = pending.Pop();
                     string[] subs = null;
                     try { subs = Directory.GetDirectories(d); } catch { }
@@ -2028,27 +2048,125 @@ public class Engine {
                     try { fsArr = Directory.GetFiles(d, glob); } catch { }
                     if (fsArr == null) continue;
                     foreach (string f in fsArr) {
-                        if (matches >= 50 || files >= 400 || swG.Elapsed.TotalSeconds > 8) break;
+                        if (matches >= maxHits || files >= maxFiles || swG.Elapsed.TotalSeconds > maxSec) break;
                         files++;
                         if (Array.IndexOf(skipExt, Path.GetExtension(f).ToLowerInvariant()) >= 0) continue;
                         try {
                             if (new FileInfo(f).Length > 2000000) continue;
                             string[] lines = File.ReadAllLines(f);
-                            for (int li = 0; li < lines.Length && matches < 50; li++) {
-                                if (rx.IsMatch(lines[li])) {
-                                    matches++;
-                                    string one = lines[li].Trim();
-                                    if (one.Length > 160) one = one.Substring(0, 160) + "…";
-                                    sbG.Append(f).Append(':').Append(li + 1).Append(": ").Append(one).Append('\n');
+                            int fileHits = 0, lastEnd = -2;
+                            bool wroteAny = false;
+                            for (int li = 0; li < lines.Length && matches < maxHits; li++) {
+                                if (!rx.IsMatch(lines[li])) continue;
+                                matches++; fileHits++;
+                                if (mode == "files") break;   // 1a ocorrencia deste arquivo basta
+                                if (mode == "count") continue;
+                                string one = lines[li].Trim();
+                                if (one.Length > 160) one = one.Substring(0, 160) + "…";
+                                if (ctx == 0) { sbG.Append(f).Append(':').Append(li + 1).Append(": ").Append(one).Append('\n'); continue; }
+                                // com contexto: range [li-ctx, li+ctx]; grupo que encosta no
+                                // anterior cola (nao reimprime), lacuna ganha separador --
+                                int st = Math.Max(0, li - ctx), en = Math.Min(lines.Length - 1, li + ctx);
+                                if (st <= lastEnd + 1) st = lastEnd + 1;
+                                else if (wroteAny) sbG.Append("--\n");
+                                for (int k = st; k <= en; k++) {
+                                    string oc = lines[k].Trim();
+                                    if (oc.Length > 160) oc = oc.Substring(0, 160) + "…";
+                                    sbG.Append(f).Append(':').Append(k + 1).Append(k == li ? ": " : "- ").Append(oc).Append('\n');
                                 }
+                                lastEnd = en; wroteAny = true;
                             }
+                            if (fileHits > 0 && mode == "files") { sbG.Append(f).Append('\n'); hitFiles++; }
+                            if (fileHits > 0 && mode == "count") { countSb.Append(fileHits).Append('\t').Append(f).Append('\n'); hitFiles++; }
                         } catch { }
                     }
                 }
+                string caps = (files >= maxFiles ? " (limite " + maxFiles + " arquivos)" : "")
+                            + (swG.Elapsed.TotalSeconds > maxSec ? " (parou por tempo)" : "");
+                if (mode == "files") {
+                    if (hitFiles == 0) return "Nenhum arquivo com \"" + pattern + "\" em " + dir + " (" + files + " arquivo(s) varridos).";
+                    return "GREP \"" + pattern + "\" em " + dir + " — " + hitFiles + " arquivo(s) com ocorrência (" + files + " varridos)" + caps + ":\n" + sbG.ToString();
+                }
+                if (mode == "count") {
+                    if (hitFiles == 0) return "Nenhum resultado de \"" + pattern + "\" em " + dir + " (" + files + " arquivo(s) varridos).";
+                    var cl = new List<string>(countSb.ToString().Split('\n'));
+                    cl.RemoveAll(delegate(string s2) { return s2.Length == 0; });
+                    cl.Sort(delegate(string a2, string b2) { return int.Parse(b2.Split('\t')[0]).CompareTo(int.Parse(a2.Split('\t')[0])); });
+                    return "GREP \"" + pattern + "\" em " + dir + " — ocorrências por arquivo, desc (" + files + " varridos)" + caps + ":\n" + string.Join("\n", cl.ToArray());
+                }
                 if (matches == 0) return "Nenhum resultado de \"" + pattern + "\" em " + dir + " (" + files + " arquivo(s) varridos).";
                 return "GREP \"" + pattern + "\" em " + dir + " — " + matches + " linha(s), " + files + " arquivo(s) varridos"
-                    + (matches >= 50 ? " (limite 50)" : "") + (files >= 400 ? " (limite 400 arquivos)" : "")
-                    + (swG.Elapsed.TotalSeconds > 8 ? " (parou por tempo)" : "") + ":\n" + sbG.ToString();
+                    + (matches >= maxHits ? " (limite " + maxHits + ")" : "") + caps + ":\n" + sbG.ToString();
+            }
+            if (name == "git_status") {
+                string repo = ResolveGitRepo(inp);
+                if (repo == null) return "ERRO: não é um repositório git (ou a pasta não existe). Informe 'repo' com o caminho absoluto da pasta do repositório.";
+                return GitRun("status --porcelain=v1 -b", repo, 15000);
+            }
+            if (name == "git_diff") {
+                string repo = ResolveGitRepo(inp);
+                if (repo == null) return "ERRO: não é um repositório git (ou a pasta não existe). Informe 'repo' com o caminho absoluto da pasta do repositório.";
+                object sv; bool staged = inp != null && inp.TryGetValue("staged", out sv) && sv is bool && (bool)sv;
+                string fpath = H.S(inp, "path");
+                string ga = staged ? "diff --cached" : "diff";
+                if (!string.IsNullOrEmpty(fpath)) ga += " -- " + fpath;
+                return Trunc(GitRun(ga, repo, 20000), 12000);
+            }
+            if (name == "git_log") {
+                string repo = ResolveGitRepo(inp);
+                if (repo == null) return "ERRO: não é um repositório git (ou a pasta não existe). Informe 'repo' com o caminho absoluto da pasta do repositório.";
+                double nd = H.N(inp, "n"); int n = nd >= 1 ? Math.Min(50, (int)nd) : 15;
+                string fpath = H.S(inp, "path");
+                string ga = "log -n " + n + " --date=short --pretty=format:\"%h %ad %s (%an)\"";
+                if (!string.IsNullOrEmpty(fpath)) ga += " -- " + fpath;
+                return GitRun(ga, repo, 15000);
+            }
+            if (name == "git_commit") {
+                string repo = ResolveGitRepo(inp);
+                if (repo == null) return "ERRO: não é um repositório git (ou a pasta não existe). Informe 'repo' com o caminho absoluto da pasta do repositório.";
+                string msg = H.S(inp, "message");
+                if (string.IsNullOrEmpty(msg)) return "ERRO: informe 'message' (mensagem do commit).";
+                object sv; bool addAll = inp != null && inp.TryGetValue("addAll", out sv) && sv is bool && (bool)sv;
+                var paths = new List<string>();
+                object pv;
+                if (inp != null && inp.TryGetValue("paths", out pv) && pv is List<object>)
+                    foreach (object x in (List<object>)pv) { string s2 = x as string; if (!string.IsNullOrEmpty(s2)) paths.Add(s2); }
+                string cmsg = msg.Replace("\"", "\\\"");
+                string preview = addAll ? "git add -A" : (paths.Count > 0 ? "git add " + string.Join(" ", paths.ToArray()) : "(só o que já está staged)");
+                if (!GateConfirm("git_commit", repo, "Commit no git", "repo: " + repo + "\n" + preview + "\ngit commit -m \"" + msg + "\"", null, ct)) return "NEGADO pelo usuário.";
+                if (addAll) { string r1 = GitRun("add -A", repo, 30000); if (!GitOk(r1)) return "ERRO no git add:\n" + r1; }
+                else if (paths.Count > 0) { string r1 = GitRun("add " + string.Join(" ", paths.ToArray()), repo, 30000); if (!GitOk(r1)) return "ERRO no git add:\n" + r1; }
+                string rc = GitRun("commit -m \"" + cmsg + "\"", repo, 30000);
+                string head = GitRun("log -1 --oneline", repo, 10000);
+                return rc + "\nHEAD agora: " + head;
+            }
+            if (name == "todo_write") {
+                var items = new List<string[]>();   // [status, conteudo]
+                object sv;
+                if (inp != null && inp.TryGetValue("todos", out sv) && sv is List<object>)
+                    foreach (object x in (List<object>)sv) {
+                        Dictionary<string, object> d2 = x as Dictionary<string, object>;
+                        if (d2 == null) continue;
+                        string ct2 = H.S(d2, "content");
+                        string st2 = (H.S(d2, "status") ?? "pending").ToLowerInvariant();
+                        if (st2 != "pending" && st2 != "in_progress" && st2 != "completed") st2 = "pending";
+                        if (string.IsNullOrEmpty(ct2)) continue;
+                        ct2 = ct2.Trim(); if (ct2.Length > 120) ct2 = ct2.Substring(0, 120);
+                        items.Add(new string[] { st2, ct2 });
+                        if (items.Count >= 12) break;
+                    }
+                if (items.Count == 0) { Emit("todo", "{\"clear\":true}"); return "OK — checklist LIMPO (painel fechado)."; }
+                var jb = new StringBuilder("[");
+                int done = 0;
+                for (int ti = 0; ti < items.Count; ti++) {
+                    if (ti > 0) jb.Append(',');
+                    jb.Append("{\"content\":").Append(J(items[ti][1])).Append(",\"status\":\"").Append(items[ti][0]).Append("\"}");
+                    if (items[ti][0] == "completed") done++;
+                }
+                jb.Append(']');
+                Emit("todo", jb.ToString());
+                Emit("status", "📋 checklist atualizado — " + done + "/" + items.Count);
+                return "OK — checklist visível ao usuário (" + items.Count + " itens, " + done + " concluídos). Atualize chamando todo_write de novo (lista completa) conforme avança.";
             }
             if (name == "file_edit") {
                 string path = H.S(inp, "path");
@@ -2280,6 +2398,7 @@ public class Engine {
             KillShell();
             return "TIMEOUT (" + timeoutSec + "s) — sessão reiniciada. Saída até ali:\n" + Trunc(sb.ToString(), 4000);
         }
+        _shCwd = cwd;   // Onda 7: lembra o cwd p/ default de 'repo' nas git tools
         Thread.Sleep(30);   // deixa o stderr da vez chegar no pump
         string errs;
         lock (_shLock) { errs = string.Join("\n", _shErrBuf.ToArray()); _shErrBuf.Clear(); }
@@ -2287,6 +2406,46 @@ public class Engine {
              + (string.IsNullOrEmpty(errs) ? "" : "\n[stderr]\n" + Trunc(errs, 2000))
              + "\n" + (sb.Length > 0 ? Trunc(sb.ToString().TrimEnd('\n'), 8000) : "(sem saída)")
              + "\n[cwd: " + cwd + "]";
+    }
+
+    // ---------- Onda 7: git — status/diff/log sao leitura (paralelo); commit passa
+    // pelo GateConfirm. Roda o git.exe com timeout; saida crua volta pro modelo. ----------
+    bool GitOk(string r) { return r != null && r.StartsWith("EXIT 0"); }
+
+    string GitRun(string args, string repo, int timeoutMs) {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        psi.FileName = "git";
+        psi.Arguments = args;
+        psi.WorkingDirectory = repo;
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.StandardOutputEncoding = Encoding.UTF8;
+        psi.StandardErrorEncoding = Encoding.UTF8;
+        try {
+            using (var g = System.Diagnostics.Process.Start(psi)) {
+                string so = "", se = "";
+                var t1 = Task<string>.Factory.StartNew(delegate() { return g.StandardOutput.ReadToEnd(); });
+                var t2 = Task<string>.Factory.StartNew(delegate() { return g.StandardError.ReadToEnd(); });
+                if (!g.WaitForExit(timeoutMs)) { try { g.Kill(); } catch { } return "ERRO: git passou de " + (timeoutMs / 1000) + "s (abortado)."; }
+                if (t1.Wait(5000)) so = t1.Result;
+                if (t2.Wait(5000)) se = t2.Result;
+                return "EXIT " + g.ExitCode + "\n"
+                     + (string.IsNullOrEmpty(so) ? "" : so.TrimEnd('\n'))
+                     + (string.IsNullOrEmpty(se) ? "" : "\n[stderr]\n" + se.TrimEnd('\n'));
+            }
+        } catch (Exception ex) { return "ERRO git: " + ex.Message; }
+    }
+
+    // repo explicito > ultimo cwd da sessao persistente > cwd do processo; valida .git
+    string ResolveGitRepo(Dictionary<string, object> inp) {
+        string r = H.S(inp, "repo");
+        if (string.IsNullOrEmpty(r)) r = _shCwd;
+        if (string.IsNullOrEmpty(r)) r = Environment.CurrentDirectory;
+        if (string.IsNullOrEmpty(r) || !Directory.Exists(r)) return null;
+        if (File.Exists(Path.Combine(r, ".git")) || Directory.Exists(Path.Combine(r, ".git"))) return r;
+        return null;
     }
 
     string RunPsSession(string cmd, int timeoutSec) {
@@ -2546,9 +2705,11 @@ $sysPrompt = if ($cfg.systemPrompt) { [string]$cfg.systemPrompt } else {
      "Se o usuário anexar imagens (prints), interprete o que foi pedido. " +
      "Arquivo anexado (PDF, DOCX, texto/código) chega DENTRO da mensagem — responda pelo conteúdo anexado, sem procurar no disco. " +
      "Você também pode AGIR no Windows do usuário: file_list/file_read (leitura, sem confirmação), " +
-     "file_grep (busca de CONTEÚDO dentro dos arquivos de uma pasta, recursiva — quando quiser achar onde algo está definido ou usado, prefira file_grep a ler arquivo por arquivo), " +
+     "file_grep (busca de CONTEÚDO dentro dos arquivos de uma pasta, recursiva — quando quiser achar onde algo está definido ou usado, prefira file_grep a ler arquivo por arquivo; use mode:'files' para listar só os arquivos que contêm o termo), " +
      "file_edit (edição cirúrgica troca-por-troca com diff para o usuário aprovar — para alterar arquivo existente, SEMPRE prefira file_edit a regravar com file_write), " +
      "file_write (cria/sobrescreve arquivo inteiro)/file_move/file_delete (alteram algo — o usuário autoriza cada uma na janela; apagar vai para a Lixeira), " +
+     "git_status/git_diff/git_log (leem o estado do repositório git — repo padrão = último cwd do shell) e git_commit (grava, com aprovação), " +
+     "todo_write (checklist do turno visível ao usuário — em tarefa de 3+ passos, abra com os passos e vá marcando completed; mande a lista COMPLETA a cada atualização), " +
      "note_add (grava nota em Documentos\\ZQuick-Notas, sem confirmação), " +
      "memory_save (grava fato DURÁVEL sobre o usuário/suas máquinas/preferências — vale para as próximas conversas; use quando aprender algo que vai precisar de novo e não for específico da conversa atual) " +
      "e run_ps (QUALQUER comando PowerShell — sempre autorizado pelo usuário; os comandos rodam numa SESSÃO PERSISTENTE por conversa: pasta atual, variáveis e funções criadas numa chamada existem na seguinte; " +
@@ -2771,6 +2932,23 @@ $xamlStr = @'
             </StackPanel>
           </StackPanel>
         </Border>
+        <Border x:Name="TodoBar" Visibility="Collapsed" Background="#3A3A44" CornerRadius="6" Margin="14,6,14,0" Padding="10,8">
+          <StackPanel>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBlock x:Name="TodoHeader" Foreground="#9A9AA5" FontSize="10" FontWeight="SemiBold" Text="📋 TAREFAS"/>
+              <Button x:Name="TodoHide" Grid.Column="1" Content="✕" Padding="6,0" FontSize="10"
+                      ToolTip="Oculta o checklist (a tool todo_write segue funcionando)"/>
+            </Grid>
+            <ScrollViewer x:Name="TodoScroll" MaxHeight="110" Margin="0,4,0,0"
+                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel x:Name="TodoItems"/>
+            </ScrollViewer>
+          </StackPanel>
+        </Border>
         <Border x:Name="QueueBar" Visibility="Collapsed" Background="#3A3A44" CornerRadius="6" Margin="14,6,14,0" Padding="10,8">
           <StackPanel>
             <TextBlock x:Name="QueueHeader" Foreground="#9A9AA5" FontSize="10" FontWeight="SemiBold"
@@ -2803,7 +2981,7 @@ $xamlStr = @'
 [xml]$xaml = Theme-Xaml $xamlStr
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
-foreach ($n in 'LogoText','ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','QueueBar','QueueHeader','QueueScroll','QueuePanel','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
+foreach ($n in 'LogoText','ProfileBox','ModelBox','NewBtn','HistBtn','TopBtn','PassBtn','SettingsBtn','MinBtn','MaxBtn','CloseBtn','AttachScroll','AttachPanel','ConfirmBar','ConfirmTitle','ConfirmDetail','ConfirmDiffScroll','ConfirmDiff','ConfirmYes','ConfirmAlwaysBtn','ConfirmNo','PlanBar','PlanTitle','PlanSteps','PlanYes','PlanNo','AskBar','AskHeader','AskTitle','AskPanel','AskInput','AskSendBtn','AskOkBtn','AskOtherBtn','AskCancelBtn','AskFreeRow','TodoBar','TodoHeader','TodoHide','TodoScroll','TodoItems','QueueBar','QueueHeader','QueueScroll','QueuePanel','SendBtn','InputBox','StatusText','ModelText','AnswerView','AnswerDoc') {
     Set-Variable -Name $n -Scope Script -Value $window.FindName($n)
 }
 $script:baseOpacity = 1.0
@@ -3507,6 +3685,15 @@ function Send-Current {
         Log 'uitest: plantext'
         return
     }
+    if ($text -eq '/uitest todo') {
+        # v3.25: painel de checklist (todo_write) — 3 estados visiveis de uma vez
+        $InputBox.Clear()
+        Show-Todo @([pscustomobject]@{ content = 'passo concluído (uitest)'; status = 'completed' },
+                    [pscustomobject]@{ content = 'passo em curso (uitest)'; status = 'in_progress' },
+                    [pscustomobject]@{ content = 'passo pendente (uitest)'; status = 'pending' })
+        Log 'uitest: todo'
+        return
+    }
     if ($text -eq '/uitest at') {
         # hook E2E do dialogo de mencao: chars INJETADOS nao viram texto nesta
         # sessao (TSF descarta input injetado — so' keydown puro chega), então
@@ -3726,6 +3913,7 @@ function New-Conversation {
     $script:attachments.Clear(); $AttachPanel.Children.Clear(); $AttachScroll.Visibility = 'Collapsed'
     $ConfirmBar.Visibility = 'Collapsed'
     $PlanBar.Visibility = 'Collapsed'
+    $TodoBar.Visibility = 'Collapsed'; $TodoItems.Children.Clear()   # v3.25: checklist é por conversa
     if ($AskBar.Visibility -eq 'Visible') { $script:askCard = $null; Hide-AskBar }
     $script:stopped = $false
     Set-Busy $false
@@ -5050,6 +5238,11 @@ $timer.Add_Tick({
                 if ($c -and $c.hide) { Hide-PlanBar }
                 elseif ($c) { $script:planGateSeen = $true; Show-PlanBar $c }
             }
+            'todo' {   # v3.25: checklist do turno (todo_write) — array de itens ou {"clear":true}
+                try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("todo-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
+                if ($c -and $c.clear) { $TodoBar.Visibility = 'Collapsed' }
+                elseif ($c) { Show-Todo @($c) }
+            }
             'confirm' {
                 try { $c = $m.Text | ConvertFrom-Json } catch { $c = $null; Log ("confirm-parse ERRO: " + $_.Exception.Message + " | payload: " + $m.Text) }
                 if ($c -and $c.hide) { $ConfirmBar.Visibility = 'Collapsed' }
@@ -5302,6 +5495,29 @@ function Show-PlanBar($c) {
 
 function Hide-PlanBar { $PlanBar.Visibility = 'Collapsed' }
 
+# v3.25: checklist do turno (tool todo_write) — painel vivo entre o Ask e a fila.
+# pending = ○ apagado · in_progress = ● accent/negrito · completed = ✔ riscado.
+function Show-Todo($items) {
+    $TodoItems.Children.Clear()
+    $done = 0; $tot = @($items).Count; $cur = $null
+    foreach ($it in @($items)) {
+        $st = [string]$it.status; $ctn = [string]$it.content
+        if ($st -eq 'completed') { $done++ }
+        if ($st -eq 'in_progress' -and -not $cur) { $cur = $ctn }
+        $tb = [System.Windows.Controls.TextBlock]::new()
+        $tb.FontSize = (FSz 11.5); $tb.TextWrapping = 'Wrap'; $tb.Margin = '0,1'
+        $tb.Text = $(if ($st -eq 'completed') { "✔ $ctn" } elseif ($st -eq 'in_progress') { "● $ctn" } else { "○ $ctn" })
+        $tb.Foreground = $(if ($st -eq 'completed') { $T.dim } elseif ($st -eq 'in_progress') { $T.accent } else { $T.status })
+        if ($st -eq 'completed') { $tb.TextDecorations = [System.Windows.TextDecorations]::Strikethrough }
+        if ($st -eq 'in_progress') { $tb.FontWeight = [System.Windows.FontWeights]::SemiBold }
+        $null = $TodoItems.Children.Add($tb)
+    }
+    $TodoHeader.Text = "📋 TAREFAS — $done de $tot concluídas"
+    $TodoBar.Visibility = 'Visible'
+    if (-not $window.IsVisible) { $window.Show() }
+    Log ("todo: $done/$tot" + $(if ($cur) { ' — agora: ' + $cur } else { '' }))
+}
+
 # v3.21: heurística de plano TEXTUAL — o modelo às vezes escreve o plano como
 # resposta final em vez de chamar a tool plan; o turno fecha "mudo" (como se a
 # tarefa tivesse terminado) e não há botão para aprovar. Detecta: lista numerada
@@ -5363,6 +5579,7 @@ $PlanYes.Add_Click({
         Log 'plano: aprovado'
     }
 })
+$TodoHide.Add_Click({ $TodoBar.Visibility = 'Collapsed'; Log 'todo: painel ocultado pelo usuário' })
 $PlanNo.Add_Click({
     if ($script:planMode -eq 'text') {
         Hide-PlanBar; $script:planMode = 'gate'
