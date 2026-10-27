@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.26.0'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.26.1'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -1055,6 +1055,10 @@ public class Engine {
         req.Content = new StringContent(body, Encoding.UTF8, "application/json");
         using (HttpResponseMessage resp = _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct).GetAwaiter().GetResult()) {
             string txt = ReadAll(resp);
+            // v3.26.1: saldo/plano (1113) na ida de compactacao — mesma guarda do turno
+            if ((int)resp.StatusCode == 429 && (txt.Contains("1113") || txt.Contains("Insufficient balance"))) {
+                throw new Exception("SALDO insuficiente na conta do provedor (Z.ai erro 1113) — recarregue em z.ai. Nao e rate limit e trocar de modelo nao resolve.");
+            }
             if (!resp.IsSuccessStatusCode) throw new Exception("HTTP " + (int)resp.StatusCode + " " + Trunc(txt, 200));
             Dictionary<string, object> root = MJ.Parse(txt) as Dictionary<string, object>;
             List<object> content = root != null && root.ContainsKey("content") ? root["content"] as List<object> : null;
@@ -1272,7 +1276,8 @@ public class Engine {
                         // Onda 8: orçamento de tentativas do modelo esgotou (ou erro sem
                         // recurso) → CADEIA DE FALLBACK: troca de modelo e refaz a ida
                         // em vez de matar o turno; o modelo do ⚙ volta no fim do turno.
-                        if (!ct.IsCancellationRequested && fbIdx + 1 < chain.Count) {
+                        // v3.26.1: SALDO (1113) não entra na cadeia — outro modelo não resolve.
+                        if (!ct.IsCancellationRequested && fbIdx + 1 < chain.Count && !ex.Message.StartsWith("SALDO")) {
                             string oldM = _model; fbIdx++;
                             if (_modelSave == null) _modelSave = oldM;
                             lock (_sync) { _model = chain[fbIdx]; body = BuildBody(round == 0 ? sys0 : sys); }
@@ -1901,6 +1906,13 @@ public class Engine {
         using (HttpResponseMessage resp = _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).GetAwaiter().GetResult()) {
             if (!resp.IsSuccessStatusCode) {
                 txt = ReadAll(resp);
+                // v3.26.1: 429 do Z.ai com code 1113 NAO e rate limit — e saldo/plano
+                // da conta. Mensagem amigavel SEM o prefixo "HTTP " => Retryable()=false
+                // (sem backoff inutil) e a cadeia de fallback de modelo tambem para:
+                // saldo e por conta, trocar de modelo so gastaria mais 30s.
+                if ((int)resp.StatusCode == 429 && (txt.Contains("1113") || txt.Contains("Insufficient balance"))) {
+                    throw new Exception("SALDO insuficiente na conta do provedor (Z.ai erro 1113) — recarregue em z.ai. Nao e rate limit e trocar de modelo nao resolve.");
+                }
                 throw new Exception("HTTP " + (int)resp.StatusCode + " " + Trunc(txt, 300));
             }
             using (Stream st = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
