@@ -3,11 +3,14 @@
 # qualquer outro. Roda como processo separado (pwsh -File) e publica a
 # porta em $Dir\port.txt. Atende até 20 requests e sai.
 # v3.26.1: -Balance => TODO POST responde 429 + code 1113 (saldo Z.ai).
-param([string]$Dir, [string]$BadModel, [string]$Text, [switch]$Balance)
+# v3.26.2: -Models "a,b,c" => GET responde a lista /v1/models (etapa 1 do
+#          wizard); -NoBalance "a,b" => só esses modelos respondem 429/1113.
+param([string]$Dir, [string]$BadModel, [string]$Text, [switch]$Balance, [string]$Models, [string]$NoBalance)
 $ErrorActionPreference = 'Stop'
 $tl = [System.Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $tl.Start()
 [IO.File]::WriteAllText((Join-Path $Dir 'port.txt'), "$(([Net.IPEndPoint]$tl.LocalEndpoint).Port)")
+$nbList = @($NoBalance -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 for ($ri = 0; $ri -lt 20; $ri++) {
     $c = $tl.AcceptTcpClient()
     try {
@@ -22,17 +25,32 @@ for ($ri = 0; $ri -lt 20; $ri++) {
             $total += $n
             $req += [Text.Encoding]::UTF8.GetString($buf, 0, $n)
             $headEnd = $req.IndexOf("`r`n`r`n")
-            $bodyLen = if ($req -match 'Content-Length:\s*(\d+)') { [int]$Matches[1] } else { -1 }
             # Content-Length conta BYTES — comparar $req.Length (chars) nunca fecha
             # quando o body tem acento/emoji (UTF-8 = 2+ bytes por char). Headers são
-            # ASCII, então headEnd em chars == bytes.
+            # ASCII, então headEnd em chars == bytes. GET sem Content-Length: headers
+            # completos já fecha o read (cliente espera resposta — não vai fechar).
+            $bodyLen = if ($req -match 'Content-Length:\s*(\d+)') { [int]$Matches[1] } else { -1 }
+            if ($headEnd -ge 0 -and $bodyLen -lt 0) { break }
             if ($headEnd -ge 0 -and $bodyLen -ge 0 -and $total -ge $headEnd + 4 + $bodyLen) { break }
         }
-        if (-not $req.StartsWith('POST')) { Add-Content -Path (Join-Path $Dir 'req.log') -Value ("skip#{0} não-POST (prewarm GET)" -f $ri) } else {
-        if ($Balance) {
+        if (-not $req.StartsWith('POST')) {
+            if ($Models -and $req.StartsWith('GET')) {
+                $ids = @($Models -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                $json = '{"data":[' + (($ids | ForEach-Object { '{"id":"' + $_ + '"}' }) -join ',') + ']}'
+                $pl = [Text.Encoding]::UTF8.GetBytes($json)
+                $hdr = "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nConnection: close`r`nContent-Length: $($pl.Length)`r`n`r`n"
+                $hb = [Text.Encoding]::UTF8.GetBytes($hdr)
+                $s.Write($hb, 0, $hb.Length); $s.Write($pl, 0, $pl.Length)
+                Add-Content -Path (Join-Path $Dir 'req.log') -Value ("models#{0} {1} ids" -f $ri, $ids.Count)
+            } else {
+                Add-Content -Path (Join-Path $Dir 'req.log') -Value ("skip#{0} não-POST (prewarm GET)" -f $ri)
+            }
+        } else {
+        $isNb = $nbList.Count -gt 0 -and ($req -match ('"model"\s*:\s*"(' + (($nbList | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')"'))
+        if ($Balance -or $isNb) {
             $json = '{"type":"error","error":{"type":"rate_limit_error","code":"1113","message":"[1113][Insufficient balance or no resource package. Please recharge.][fake]","request_id":"fake"}}'
             $pl = [Text.Encoding]::UTF8.GetBytes($json)
-            $hdr = "HTTP/1.1 429 Too Many Requests`r`nContent-Type: application/json`r`nContent-Length: $($pl.Length)`r`n`r`n"
+            $hdr = "HTTP/1.1 429 Too Many Requests`r`nContent-Type: application/json`r`nConnection: close`r`nContent-Length: $($pl.Length)`r`n`r`n"
             $hb = [Text.Encoding]::UTF8.GetBytes($hdr)
             $s.Write($hb, 0, $hb.Length); $s.Write($pl, 0, $pl.Length)
             Add-Content -Path (Join-Path $Dir 'req.log') -Value ("req#{0} {1:HH:mm:ss.fff} BALANCE-429" -f $ri, (Get-Date))
@@ -49,7 +67,7 @@ for ($ri = 0; $ri -lt 20; $ri++) {
                    "data: {""type"":""message_delta"",""delta"":{""stop_reason"":""end_turn""}}`r`n`r`n" +
                    "data: {""type"":""message_stop""}`r`n`r`n"
             $bb = [Text.Encoding]::UTF8.GetBytes($sse)
-            $head = "HTTP/1.1 200 OK`r`nContent-Type: text/event-stream`r`nContent-Length: $($bb.Length)`r`n`r`n"
+            $head = "HTTP/1.1 200 OK`r`nContent-Type: text/event-stream`r`nConnection: close`r`nContent-Length: $($bb.Length)`r`n`r`n"
             $hb = [Text.Encoding]::UTF8.GetBytes($head)
             $s.Write($hb, 0, $hb.Length)
             $s.Write($bb, 0, $bb.Length)

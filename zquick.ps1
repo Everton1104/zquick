@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $appDir = if ($PSScriptRoot) { $PSScriptRoot }
           else { Split-Path -Parent ([System.Reflection.Assembly]::GetEntryAssembly().Location) }
 $cfgPath = Join-Path $appDir 'zquick.json'
-$appVer = '3.26.1'   # versão do app — instalador e auto-update comparam com os releases do GitHub
+$appVer = '3.26.2'   # versão do app — instalador e auto-update comparam com os releases do GitHub
 $cfg = @{
     profile       = 'zai'
     model         = 'auto'
@@ -6644,36 +6644,60 @@ function Wz-Bench {
             $i++
             $g['WzBenchStatus'].Text = ('⏱ testando {0} ({1}/{2})…' -f $id, $i, $ids.Count)
             [void]$script:wzWin.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
-            $ms = -1; $err = $null
+            $ms = -1; $err = $null; $ns = $false
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             try {
                 $body = @{ model = $id; max_tokens = 8; messages = @(@{ role = 'user'; content = 'Responda apenas: 1' }) } | ConvertTo-Json -Depth 4
                 $null = Invoke-RestMethod -Method Post -Uri ($auth.base.TrimEnd('/') + '/v1/messages') -Body $body `
                      -ContentType 'application/json; charset=utf-8' -Headers @{ 'x-api-key' = $auth.key; 'anthropic-version' = '2023-06-01' } -TimeoutSec 40
                 $sw.Stop(); $ms = [int]$sw.ElapsedMilliseconds
-            } catch { $sw.Stop(); $err = $_.Exception.Message }
-            if ($ms -ge 0) { $rows += [pscustomobject]@{ Id = $id; Ms = $ms } }
-            else { $rows += [pscustomobject]@{ Id = $id; Ms = 999999 }; $g['WzBenchStatus'].Text = ('⚠ {0}: {1} — seguindo…' -f $id, $err) }
+            } catch {
+                # v3.26.2: 429 + 1113/"Insufficient balance" = sem saldo/plano (conta),
+                # não rate limit — o ErrorDetails traz o body da resposta no 5.1 e no 7
+                $sw.Stop(); $err = $_.Exception.Message
+                $ns = (([string]$_.ErrorDetails.Message) + ' ' + $err) -match '1113|Insufficient balance'
+            }
+            if ($ms -ge 0) { $rows += [pscustomobject]@{ Id = $id; Ms = $ms; Idx = $i; Ns = $false } }
+            else { $rows += [pscustomobject]@{ Id = $id; Ms = 999999; Idx = $i; Ns = $ns }; $g['WzBenchStatus'].Text = ('⚠ {0}: {1} — seguindo…' -f $id, $err) }
         }
-        $st.rows = @($rows | Sort-Object Ms)
+        # Ms+Idx: falhas (999999) empatam — sem o Idx o Sort-Object do 5.1 e'
+        # instavel p/ chaves iguais e a ordem dos "sem saldo" virava loteria
+        $st.rows = @($rows | Sort-Object Ms, Idx)
         $st.times = $true
         $g['WzBenchList'].ItemsSource = [string[]]@($st.rows | ForEach-Object {
-            if ($_.Ms -ge 999999) { '✕ falhou    — ' + $_.Id } else { ('{0,5} ms — {1}' -f $_.Ms, $_.Id) } })
+            if ($_.Ms -ge 999999) {
+                if ($_.Ns) { '✕ sem saldo — ' + $_.Id } else { '✕ falhou     — ' + $_.Id }
+            } else { ('{0,5} ms — {1}' -f $_.Ms, $_.Id) } })
         # recomendacoes: rapido = mais veloz que respondeu; forte = maior versao "cheia"
-        # (mesma logica do ⭐ do ⚙); visao = primeiro com cara de flash/vision
+        # (mesma logica do ⭐ do ⚙); visao = primeiro com cara de flash/vision.
+        # v3.26.2: SO modelos que responderam (= tem saldo/plano) entram na
+        # recomendacao e na lista do perfil — nao faz sentido recomendar sem saldo
         $okRows = @($st.rows | Where-Object { $_.Ms -lt 999999 })
-        $full = @($ids | Where-Object { $_ -notmatch '(?i)flash|turbo|air|mini|lite|preview|thinking' } |
+        $okIds = @($okRows | ForEach-Object { [string]$_.Id })
+        $noSaldo = @($st.rows | Where-Object { $_.Ns } | ForEach-Object { [string]$_.Id })
+        $st.workIds = $okIds
+        $full = @($okIds | Where-Object { $_ -notmatch '(?i)flash|turbo|air|mini|lite|preview|thinking' } |
             Sort-Object { $v = ($_ -replace '[^0-9.]', '').Trim('.'); try { [version]$v } catch { [version]'0.0' } })
         $st.fast = $null; $st.big = $null; $st.vision = $null
         if ($okRows.Count -gt 0) { $st.fast = [string]$okRows[0].Id }
         if ($full.Count -gt 0) { $st.big = [string]$full[-1] }
         if (-not $st.big -and $okRows.Count -gt 1) { $st.big = [string]$okRows[-1].Id }
-        $st.vision = [string](@($ids | Where-Object { $_ -match '(?i)flash|vision' } | Select-Object -First 1))
+        $st.vision = [string](@($okIds | Where-Object { $_ -match '(?i)flash|vision' } | Select-Object -First 1))
         $g['WzRec'].Text = ('⚡ rápido: {0}   (pesquisas simples)' -f $(if ($st.fast) { $st.fast } else { '—' })) + "`n" + `
                           ('🧠 forte: {0}   (tarefas complexas)' -f $(if ($st.big) { $st.big } else { '—' })) + "`n" + `
                           ('👁 visão: {0}   (lê prints)' -f $(if ($st.vision) { $st.vision } else { '—' }))
-        $g['WzBenchStatus'].Text = ('✔ {0} de {1} modelo(s) responderam — recomendação abaixo' -f $okRows.Count, $ids.Count)
-        Log ('wizard: benchmark {0} modelos (rapido={1} forte={2} visao={3})' -f $ids.Count, $st.fast, $st.big, $st.vision)
+        if ($okRows.Count -eq 0) {
+            if ($noSaldo.Count -eq @($st.rows).Count -and $noSaldo.Count -gt 0) {
+                $g['WzBenchStatus'].Text = ('✕ os {0} modelo(s) estão SEM SALDO (erro 1113 — é a conta, não rate limit). Recarregue em z.ai e meça de novo; nada foi recomendado.' -f $noSaldo.Count)
+            } else {
+                $g['WzBenchStatus'].Text = ('✕ nenhum dos {0} modelo(s) respondeu — confira a etapa 1' -f $ids.Count)
+            }
+        } elseif ($noSaldo.Count -gt 0) {
+            $g['WzBenchStatus'].Text = ('✔ {0} de {1} modelo(s) responderam — {2} sem saldo ficou fora da recomendação e da lista' -f $okRows.Count, $ids.Count, $noSaldo.Count)
+        } else {
+            $g['WzBenchStatus'].Text = ('✔ {0} de {1} modelo(s) responderam — recomendação abaixo' -f $okRows.Count, $ids.Count)
+        }
+        Log ('wizard: benchmark {0} modelos (rapido={1} forte={2} visao={3} semsaldo={4})' -f $ids.Count, $st.fast, $st.big, $st.vision, (@($noSaldo) -join ','))
     } catch {
         $g['WzBenchStatus'].Text = '✕ ' + $_.Exception.Message
         Log ('wizard: benchmark falhou: ' + $_.Exception.Message)
@@ -6732,7 +6756,10 @@ function Wz-Finish {
         $nk = ([string]$g['WzKey'].Password).Trim()
         if ($nk) { Set-CfgProp $p 'apiKey' $nk }
         elseif (Wz-IsLocalBase $nb) { Set-CfgProp $p 'apiKey' 'local' }   # perfil local novo precisa de algo em apiKey (gate da 1ª execução)
-        if ($st.ids -and @($st.ids).Count -gt 0) { Set-CfgProp $p 'models' (@('auto') + @($st.ids)) }
+        # v3.26.2: com benchmark rodado, só modelos que RESPONDERAM (= têm saldo/
+        # plano) entram na lista do perfil; sem benchmark mantém a lista completa
+        $listIds = if ($st.times -and $st.workIds -and @($st.workIds).Count -gt 0) { @($st.workIds) } else { @($st.ids) }
+        if ($listIds.Count -gt 0) { Set-CfgProp $p 'models' (@('auto') + $listIds) }
         if ($st.fast)   { Set-CfgProp $p 'fastModel'   ([string]$st.fast) }
         if ($st.big)    { Set-CfgProp $p 'bigModel'    ([string]$st.big) }
         if ($st.vision) { Set-CfgProp $p 'visionModel' ([string]$st.vision) }
@@ -6747,7 +6774,7 @@ function Wz-Finish {
         Update-ModelBox
         $StatusText.Text = '✔ configurado pelo assistente'
         Log ('wizard: configurado (perfil={0} modelos={1} auto={2} autostart={3} atalho={4} centro={5})' -f `
-            $cfg.profile, $(if ($st.ids) { @($st.ids).Count } else { 0 }), [bool]$g['WzModelAuto'].IsChecked, `
+            $cfg.profile, $listIds.Count, [bool]$g['WzModelAuto'].IsChecked, `
             [bool]$g['WzAuto'].IsChecked, [string]$cfg.hotkey, [bool]$g['WzCenter'].IsChecked)   # v3.26: atalho inalterado pelo wizard (só ⚙)
         try { $script:wzWin.DialogResult = $true } catch { try { $script:wzWin.Close() } catch {} }
     } catch {
